@@ -7,6 +7,6 @@
   "env": {
     "PYTHONUNBUFFERED": {"description":"no buffer","value":"1"}
   },
-  "formation": {"worker":{"quantity":1,"size":"basic"}},
+  "formation": {"worker":{"quantity":1,"size":"dyno-32c-64gb"}},
   "stack":"heroku-22"
 }
