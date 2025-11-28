@@ -1,5 +1,3 @@
-
-
 import os
 from dataclasses import dataclass, field
 from typing import Tuple
@@ -29,6 +27,9 @@ class WatermarkConfig:
     # Positioning
     MARGIN: int = 30  # Margin from edges
     
+    # NEW: DEFAULT WATERMARK TEXT
+    DEFAULT_TEXT: str = "@Pglinsan" # <--- NEW DEFAULT TEXT
+    
     # Video specific settings
     VIDEO_INTERVAL: float = 5.0  # Seconds between position changes
     CROSSFADE_DURATION: float = 0.5  # Crossfade transition duration
@@ -36,9 +37,9 @@ class WatermarkConfig:
     # Rendering settings
     VIDEO_CODEC: str = "libx264"
     AUDIO_CODEC: str = "aac"
-    VIDEO_PRESET: str = "medium"
-    VIDEO_CRF: int = 23
-
+    VIDEO_PRESET: str = "ultrafast"   # <--- OPTIMIZED FOR MAX SPEED
+    VIDEO_CRF: int = 28               # <--- OPTIMIZED FOR MAX SPEED
+    
 
 @dataclass
 class BotConfig:
