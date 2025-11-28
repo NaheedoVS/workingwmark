@@ -8,9 +8,9 @@ from typing import Tuple
 @dataclass
 class TelegramConfig:
     """Telegram API Configuration"""
-    API_ID = int(os.environ.get("API_ID", "37360333")) 
-    API_HASH = os.environ.get("API_HASH", "66ad4da58fcafc35e6eb6762cc562334")
-    BOT_TOKEN = os.environ.get("BOT_TOKEN", "8026693881:AAGvD1AT4eQLlxV2bd7T5fUv13oHapxk0dU")
+    API_ID = int(os.environ.get("API_ID", "")) 
+    API_HASH = os.environ.get("API_HASH", "")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 
 @dataclass
