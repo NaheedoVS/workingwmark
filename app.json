@@ -1,0 +1,12 @@
+{
+  "name": "Telegram Watermark Bot",
+  "description": "A powerful Telegram watermark bot.",
+  "repository": "https://github.com/your/repo",
+  "keywords": ["telegram","bot","watermark"],
+  "buildpacks":[{"url":"heroku/python"}],
+  "env": {
+    "PYTHONUNBUFFERED": {"description":"no buffer","value":"1"}
+  },
+  "formation": {"worker":{"quantity":1,"size":"basic"}},
+  "stack":"heroku-22"
+}

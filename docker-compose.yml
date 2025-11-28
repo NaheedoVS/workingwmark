@@ -1,0 +1,9 @@
+version: "3.9"
+services:
+  watermark-bot:
+    build: .
+    restart: always
+    volumes:
+      - ./downloads:/app/downloads
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
