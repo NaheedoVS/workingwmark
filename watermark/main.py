@@ -130,8 +130,8 @@ class UserSession:
             self.downloaded_file_path = None
             self.file_type = None
     # Clear tracked message ids
-    self.message_ids = []
-    self.user_message_ids = []
+        self.message_ids = []
+        self.user_message_ids = []
 
 
 
