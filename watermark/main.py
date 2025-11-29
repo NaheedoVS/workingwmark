@@ -121,7 +121,7 @@ class UserSession:
         return self.message_ids + self.user_message_ids
     
     def reset(self, keep_file: bool = False):
-    """Reset session state but keep watermark text for future use"""
+        """Reset session state but keep watermark text for future use"""
     # After finishing a job, user can directly send new media
     # with the same watermark text without using /w again.
     self.step = "waiting_media"
