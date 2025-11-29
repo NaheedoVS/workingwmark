@@ -116,8 +116,8 @@ class Progress:
         bar = int(pct // 5) * "█" + (20 - int(pct // 5)) * "░"
         try:
             await self.msg.edit_text(f"**{self.action}**
-[{bar}] {pct:.1f}%
-{format_size(cur)} / {format_size(total)}")
+            [{bar}] {pct:.1f}%
+            {format_size(cur)} / {format_size(total)}")
         except:
             pass
 
