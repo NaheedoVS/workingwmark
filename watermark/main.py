@@ -121,14 +121,18 @@ class UserSession:
         return self.message_ids + self.user_message_ids
     
     def reset(self, keep_file: bool = False):
-        """Reset session state"""
-        self.step = "idle"
-        if not keep_file:
-            self.watermark_text = ""
-            self.downloaded_file_path = None
-            self.file_type = None
-        self.message_ids = []
-        self.user_message_ids = []
+    """Reset session state but keep watermark text for future use"""
+    # After finishing a job, user can directly send new media
+    # with the same watermark text without using /w again.
+    self.step = "waiting_media"
+    if not keep_file:
+        # We only clear file-related fields, not the text itself
+        self.downloaded_file_path = None
+        self.file_type = None
+    # Clear tracked message ids
+    self.message_ids = []
+    self.user_message_ids = []
+
 
 
 class SessionManager:
@@ -445,138 +449,83 @@ def process_video(
     output_path: str,
     progress_callback: Optional[callable] = None
 ) -> Tuple[bool, Optional[str]]:
+    """Process a video using ffmpeg with a static text watermark.
+
+    This version is optimized for speed:
+    - Uses ffmpeg directly instead of MoviePy
+    - Copies audio stream without re-encoding
+    - Keeps watermark text support
+    Returns (success, error_message).
     """
-    Process a video with dynamic moving watermark
-    Watermark appears at random positions every 5 seconds with crossfade
-    Returns (success, error_message)
-    """
-    video = None
-    final_video = None
-    
     try:
-        logger.info(f"Processing video: {input_path}")
-        
-        # Load video
-        video = VideoFileClip(input_path)
-        duration = video.duration
-        video_size = video.size  # (width, height)
-        fps = video.fps or 24
-        
-        logger.info(f"Video info: {video_size[0]}x{video_size[1]}, {duration:.2f}s, {fps} fps")
-        
-        # Create watermark image
+        logger.info(f"Processing video with ffmpeg: {input_path}")
+
+        # Create watermark image from text (re-uses existing styling)
         watermark_img = create_watermark_image(watermark_text)
-        wm_width, wm_height = watermark_img.size
-        
-        # Calculate number of segments
-        interval = watermark_config.VIDEO_INTERVAL
-        crossfade = watermark_config.CROSSFADE_DURATION
-        num_segments = int(np.ceil(duration / interval))
-        
-        logger.info(f"Creating {num_segments} watermark segments")
-        
-        # Create watermark clips for each segment
-        watermark_clips = []
-        
-        for i in range(num_segments):
-            start_time = i * interval
-            segment_duration = min(interval, duration - start_time)
-            
-            if segment_duration <= 0:
-                break
-            
-            # Get random position for this segment
-            position = get_random_position(
-                video_size[0], video_size[1],
-                wm_width, wm_height,
-                watermark_config.MARGIN
-            )
-            
-            # Create watermark clip with crossfade
-            wm_clip = create_watermark_clip(
-                watermark_img,
-                segment_duration,
-                position,
-                video_size,
-                start_time,
-                crossfade,
-                crossfade
-            )
-            
-            watermark_clips.append(wm_clip)
-            logger.debug(f"Segment {i+1}: pos={position}, duration={segment_duration:.2f}s")
-        
-        # Composite video with all watermark clips
-        final_video = CompositeVideoClip([video] + watermark_clips)
-        
-        # Render the video
-        logger.info("Rendering video...")
-        
-        final_video.write_videofile(
-            output_path,
-            codec=watermark_config.VIDEO_CODEC,
-            audio_codec=watermark_config.AUDIO_CODEC,
-            preset=watermark_config.VIDEO_PRESET,
-            fps=fps,
-            logger=None,  # Suppress MoviePy's default logger
-            threads=4
+        wm_tmp_path = os.path.join(
+            bot_config.OUTPUT_DIR,
+            f"wm_overlay_{int(time.time())}.png"
         )
-        
-        # Check output file size
+        watermark_img.save(wm_tmp_path, "PNG")
+
+        # Build ffmpeg command
+        # Bottom-right overlay with margin; video re-encoded with configured codec
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", input_path,
+            "-i", wm_tmp_path,
+            "-filter_complex", f"overlay=W-w-{watermark_config.MARGIN}:H-h-{watermark_config.MARGIN}",
+            "-c:v", watermark_config.VIDEO_CODEC,
+            "-preset", watermark_config.VIDEO_PRESET,
+            "-c:a", "copy",
+            output_path,
+        ]
+
+        logger.debug("Running ffmpeg command: %s", " ".join(ffmpeg_cmd))
+        result = subprocess.run(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Cleanup temporary watermark image
+        try:
+            if os.path.exists(wm_tmp_path):
+                os.remove(wm_tmp_path)
+        except Exception as e:
+            logger.warning(f"Failed to remove temp watermark image: {e}")
+
+        if result.returncode != 0:
+            logger.error(f"ffmpeg failed: {result.stderr[-400:]} ")
+            return (False, "Video processing failed at ffmpeg stage.")
+
+        # Validate size
+        if not os.path.exists(output_path):
+            logger.error("Output file was not created by ffmpeg")
+            return (False, "Output file was not created.")
+
         output_size = os.path.getsize(output_path)
         if output_size > bot_config.MAX_FILE_SIZE:
             logger.error(f"Output file too large: {format_size(output_size)}")
-            return (False, f"Output file is too large ({format_size(output_size)}). Maximum allowed is {bot_config.MAX_FILE_SIZE_DISPLAY}.")
-        
-        logger.info(f"Video processed successfully: {output_path} ({format_size(output_size)})")
+            return (
+                False,
+                f"Output file is too large ({format_size(output_size)}). Maximum allowed is {bot_config.MAX_FILE_SIZE_DISPLAY}.",
+            )
+
+        logger.info(f"Video processed successfully via ffmpeg: {output_path} ({format_size(output_size)})")
         return (True, None)
-        
+
     except Exception as e:
-        logger.error(f"Video processing failed: {e}", exc_info=True)
+        logger.error(f"ffmpeg processing error: {e}", exc_info=True)
         return (False, str(e))
-        
     finally:
-        # Cleanup clips
-        try:
-            if final_video:
-                final_video.close()
-            if video:
-                video.close()
-        except Exception as e:
-            logger.debug(f"Cleanup error: {e}")
-
-# ============================================================================
-# MESSAGE CLEANUP
-# ============================================================================
-async def cleanup_session_messages(
-    client: Client,
-    chat_id: int,
-    session: UserSession
-):
-    """Delete all tracked messages from a session"""
-    message_ids = session.get_all_message_ids()
-    
-    if not message_ids:
-        return
-    
-    logger.info(f"Cleaning up {len(message_ids)} messages for user {chat_id}")
-    
-    # Delete in batches of 100 (Telegram limit)
-    for i in range(0, len(message_ids), 100):
-        batch = message_ids[i:i+100]
-        try:
-            await client.delete_messages(chat_id, batch)
-        except MessageDeleteForbidden:
-            logger.warning(f"Cannot delete some messages (forbidden)")
-        except Exception as e:
-            logger.error(f"Message cleanup error: {e}")
-    
-    # Clear tracked message IDs
-    session.message_ids = []
-    session.user_message_ids = []
+        # progress_callback is unused in this fast path, but kept for API compatibility
+        pass
 
 
-async def cleanup_local_files(*file_paths: str):
+(*file_paths: str):
     """Delete local files"""
     for path in file_paths:
         if path and os.path.exists(path):
