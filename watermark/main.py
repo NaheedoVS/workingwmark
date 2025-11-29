@@ -127,8 +127,8 @@ class UserSession:
         self.step = "waiting_media"
         if not keep_file:
         # We only clear file-related fields, not the text itself
-        self.downloaded_file_path = None
-        self.file_type = None
+            self.downloaded_file_path = None
+            self.file_type = None
     # Clear tracked message ids
     self.message_ids = []
     self.user_message_ids = []
