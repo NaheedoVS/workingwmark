@@ -124,8 +124,8 @@ class UserSession:
         """Reset session state but keep watermark text for future use"""
     # After finishing a job, user can directly send new media
     # with the same watermark text without using /w again.
-    self.step = "waiting_media"
-    if not keep_file:
+        self.step = "waiting_media"
+        if not keep_file:
         # We only clear file-related fields, not the text itself
         self.downloaded_file_path = None
         self.file_type = None
