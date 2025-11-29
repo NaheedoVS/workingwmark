@@ -94,7 +94,6 @@ logger = setup_logging()
 # ============================================================================
 # USER SESSION MANAGEMENT
 # ============================================================================
-
 @dataclass
 class UserSession:
     """Represents a user's watermarking session"""
@@ -122,59 +121,22 @@ class UserSession:
         return self.message_ids + self.user_message_ids
     
     def reset(self, keep_file: bool = False):
-        """Reset session state but keep watermark text for future use"""
-        # After finishing a job, user can directly send new media
-        # with the same watermark text without using /w again.
-        self.step = "waiting_media"
-        if not keep_file:
-            # We only clear file-related fields, not the text itself
-            self.downloaded_file_path = None
-            self.file_type = None
-        # Clear tracked message ids
-        self.message_ids = []
-        self.user_message_ids = []
+    """Reset session state but keep watermark text for future use"""
+    # After finishing a job, user can directly send new media
+    # with the same watermark text without using /w again.
+    self.step = "waiting_media"
+    if not keep_file:
+        # We only clear file-related fields, not the text itself
+        self.downloaded_file_path = None
+        self.file_type = None
+    # Clear tracked message ids
+    self.message_ids = []
+    self.user_message_ids = []
+
 
 
 class SessionManager:
     """Manages all user sessions"""
-    
-    def __init__(self):
-        self._sessions: Dict[int, UserSession] = {}
-        self._lock = asyncio.Lock()
-    
-    async def get_session(self, user_id: int) -> UserSession:
-        """Get or create a session for user"""
-        async with self._lock:
-            if user_id not in self._sessions:
-                self._sessions[user_id] = UserSession(user_id=user_id)
-                logger.info(f"Created new session for user {user_id}")
-            return self._sessions[user_id]
-    
-    async def has_unfinished_session(self, user_id: int) -> bool:
-        """Check if user has an unfinished session with downloaded file"""
-        session = await self.get_session(user_id)
-        if session.downloaded_file_path and os.path.exists(session.downloaded_file_path):
-            return True
-        return False
-    
-    async def clear_session(self, user_id: int):
-        """Clear session and cleanup files"""
-        async with self._lock:
-            if user_id in self._sessions:
-                session = self._sessions[user_id]
-                # Cleanup file if exists
-                if session.downloaded_file_path and os.path.exists(session.downloaded_file_path):
-                    try:
-                        os.remove(session.downloaded_file_path)
-                        logger.info(f"Cleaned up file: {session.downloaded_file_path}")
-                    except Exception as e:
-                        logger.error(f"Failed to cleanup file: {e}")
-                
-                self._sessions[user_id] = UserSession(user_id=user_id)
-
-
-# Global session manager
-session_manager = SessionManager()
     
     def __init__(self):
         self._sessions: Dict[int, UserSession] = {}
@@ -563,7 +525,7 @@ def process_video(
         pass
 
 
-def cleanup_local_files(*file_paths: str):
+(*file_paths: str):
     """Delete local files"""
     for path in file_paths:
         if path and os.path.exists(path):
