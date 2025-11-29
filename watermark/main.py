@@ -525,7 +525,7 @@ def process_video(
         pass
 
 
-(*file_paths: str):
+def (*file_paths: str):
     """Delete local files"""
     for path in file_paths:
         if path and os.path.exists(path):
