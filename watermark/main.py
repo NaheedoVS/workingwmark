@@ -94,6 +94,9 @@ logger = setup_logging()
 # ============================================================================
 # USER SESSION MANAGEMENT
 # ============================================================================
+
+
+
 @dataclass
 class UserSession:
     """Represents a user's watermarking session"""
@@ -122,20 +125,16 @@ class UserSession:
     
     def reset(self, keep_file: bool = False):
         """Reset session state but keep watermark text for future use"""
-    # After finishing a job, user can directly send new media
-    # with the same watermark text without using /w again.
-    self.step = "waiting_media"
-    if not keep_file:
-        # We only clear file-related fields, not the text itself
-        self.downloaded_file_path = None
-        self.file_type = None
-    # Clear tracked message ids
-    self.message_ids = []
-    self.user_message_ids = []
-
-
-
-class SessionManager:
+        # After finishing a job, user can directly send new media
+        # with the same watermark text without using /w again.
+        self.step = "waiting_media"
+        if not keep_file:
+            # We only clear file-related fields, not the text itself
+            self.downloaded_file_path = None
+            self.file_type = None
+        # Clear tracked message ids
+        self.message_ids = []
+        self.user_message_ids = []Manager:
     """Manages all user sessions"""
     
     def __init__(self):
