@@ -95,8 +95,6 @@ logger = setup_logging()
 # USER SESSION MANAGEMENT
 # ============================================================================
 
-
-
 @dataclass
 class UserSession:
     """Represents a user's watermarking session"""
@@ -134,8 +132,49 @@ class UserSession:
             self.file_type = None
         # Clear tracked message ids
         self.message_ids = []
-        self.user_message_ids = []Manager:
+        self.user_message_ids = []
+
+
+class SessionManager:
     """Manages all user sessions"""
+    
+    def __init__(self):
+        self._sessions: Dict[int, UserSession] = {}
+        self._lock = asyncio.Lock()
+    
+    async def get_session(self, user_id: int) -> UserSession:
+        """Get or create a session for user"""
+        async with self._lock:
+            if user_id not in self._sessions:
+                self._sessions[user_id] = UserSession(user_id=user_id)
+                logger.info(f"Created new session for user {user_id}")
+            return self._sessions[user_id]
+    
+    async def has_unfinished_session(self, user_id: int) -> bool:
+        """Check if user has an unfinished session with downloaded file"""
+        session = await self.get_session(user_id)
+        if session.downloaded_file_path and os.path.exists(session.downloaded_file_path):
+            return True
+        return False
+    
+    async def clear_session(self, user_id: int):
+        """Clear session and cleanup files"""
+        async with self._lock:
+            if user_id in self._sessions:
+                session = self._sessions[user_id]
+                # Cleanup file if exists
+                if session.downloaded_file_path and os.path.exists(session.downloaded_file_path):
+                    try:
+                        os.remove(session.downloaded_file_path)
+                        logger.info(f"Cleaned up file: {session.downloaded_file_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to cleanup file: {e}")
+                
+                self._sessions[user_id] = UserSession(user_id=user_id)
+
+
+# Global session manager
+session_manager = SessionManager()
     
     def __init__(self):
         self._sessions: Dict[int, UserSession] = {}
