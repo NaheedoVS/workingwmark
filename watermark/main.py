@@ -37,6 +37,7 @@ class UserSession:
 
 session_manager = {}
 lock = asyncio.Lock()
+
 async def get_session(uid):
     async with lock:
         return session_manager.setdefault(uid, UserSession(uid))
@@ -51,12 +52,16 @@ async def download_progress(cur, tot, msg):
     except: pass
 
 # ==================== WATERMARK ====================
-def create_watermark(text:str, scale=0.7):
+def create_watermark(text:str, scale=0.595):   # 15% smaller
     font = ImageFont.load_default()
     for p in ["fonts/Roboto-Bold.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
         if os.path.exists(p):
-            try: font = ImageFont.truetype(p,36); break
-            except: pass
+            try:
+                font = ImageFont.truetype(p,36)
+                break
+            except:
+                pass
+
     dummy = Image.new("RGBA",(1,1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0,0),text,font=font)
@@ -66,38 +71,81 @@ def create_watermark(text:str, scale=0.7):
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle((0,0,w-1,h-1),radius=10,fill=(0,0,0,180))
     draw.text((px//2,py//2),text,font=font,fill=(255,255,255,255))
+
     new_w,new_h = int(w*scale),int(h*scale)
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
-# ==================== VIDEO PROCESSING ====================
-def process_video(in_path,text,out_path,crf=21,resolution=720):
+# ==================== FIXED VIDEO PROCESSING ====================
+def process_video(in_path, text, out_path, crf=21, resolution=720):
     try:
-        wm=create_watermark(text)
-        wm_path=f"/tmp/wm_{os.getpid()}.png"
+        # Create watermark PNG
+        wm = create_watermark(text)
+        wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
-        positions=[(random.randint(0,1280-wm.width),random.randint(0,720-wm.height)) for _ in range(10)]
-        dur=5
-        fc=f"[0:v]scale=-2:{resolution}[scaled];"
-        last="[scaled]"
+
+        # Get video dimensions
+        probe = subprocess.run([
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json", in_path
+        ], capture_output=True, text=True)
+
+        meta = json.loads(probe.stdout)
+        in_w = meta["streams"][0]["width"]
+        in_h = meta["streams"][0]["height"]
+
+        scale_h = resolution
+        scale_w = int(in_w * (resolution / in_h))
+
+        positions = [
+            (
+                max(0, random.randint(0, max(0, scale_w - wm.width))),
+                max(0, random.randint(0, max(0, scale_h - wm.height)))
+            )
+            for _ in range(10)
+        ]
+
+        filter_chain = f"[0:v]scale=-2:{resolution}[scaled];"
+        last = "[scaled]"
+        block = 5
+
         for i,(x,y) in enumerate(positions):
-            tmp=f"[wm{i}]" if i<len(positions)-1 else ""
-            fc+=f"{last}[1:v]overlay=x={x}:y={y}:enable='between(t,{i*dur},{(i+1)*dur})'{tmp};"
-            last=tmp
-        fc=fc.rstrip(";")
-        cmd=[
+            out = f"[v{i}]"
+            filter_chain += (
+                f"{last}[1:v]overlay="
+                f"x={x}:y={y}:enable='between(t,{i*block},{(i+1)*block})'"
+                f"{out};"
+            )
+            last = out
+
+        filter_chain = filter_chain.rstrip(";")
+
+        cmd = [
             "ffmpeg","-y",
             "-i",in_path,
             "-i",wm_path,
-            "-filter_complex",fc,
-            "-c:v","libx264","-preset","fast","-crf",str(crf),
-            "-c:a","aac","-b:a","192k",
+            "-filter_complex",filter_chain,
+            "-map",last,
+            "-map","0:a?",
+            "-c:v","libx264",
+            "-preset","fast",
+            "-crf",str(crf),
+            "-c:a","aac",
+            "-b:a","192k",
             "-movflags","+faststart",
             out_path
         ]
+
         result=subprocess.run(cmd,capture_output=True,text=True,timeout=21600)
         os.remove(wm_path)
-        if result.returncode!=0: logger.error(f"FFmpeg error: {result.stderr}"); return False
-        return os.path.getsize(out_path)>200000
+
+        if result.returncode!=0:
+            logger.error("FFmpeg error:\n"+result.stderr)
+            return False
+
+        return os.path.exists(out_path) and os.path.getsize(out_path)>200000
+
     except Exception as e:
         logger.error(f"Processing error: {e}")
         return False
@@ -105,13 +153,15 @@ def process_video(in_path,text,out_path,crf=21,resolution=720):
 # ==================== DURATION & THUMB ====================
 def get_duration(path):
     try:
-        r=subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration","-of","json",path],capture_output=True,text=True,timeout=15)
+        r=subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration","-of","json",path],
+                         capture_output=True,text=True,timeout=15)
         return round(float(json.loads(r.stdout)["format"]["duration"]))
     except: return 0
 
 def make_thumb(path):
     t=f"/tmp/thumb_{int(time.time())}.jpg"
-    subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale=640:-2",t],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+    subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale=640:-2",t],
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
     return t if os.path.exists(t) else None
 
 # ==================== WORKER ====================
@@ -119,26 +169,36 @@ async def worker(uid):
     sess=await get_session(uid)
     if sess.is_processing: return
     sess.is_processing=True
+
     while sess.queue:
         in_path,text,_=sess.queue.pop(0)
         out_path=f"/tmp/out_{uid}_{int(time.time())}.mp4"
         status=await app.send_message(uid,"Processing video + watermark...")
+
         success=process_video(in_path,text,out_path,sess.crf,sess.resolution)
         await status.delete()
+
         if not success or not os.path.exists(out_path):
             await app.send_message(uid,"Processing failed ❌")
             if os.path.exists(in_path): os.remove(in_path)
             continue
+
         caption=f"Watermark: {text}\nCRF: {sess.crf}\nResolution: {sess.resolution}p"
+
         try:
             thumb=make_thumb(out_path)
             duration=get_duration(out_path)
-            await app.send_video(uid,out_path,caption=caption,duration=duration,thumb=thumb,supports_streaming=True,file_name=f"wm_{int(time.time())}.mp4")
+            await app.send_video(uid,out_path,caption=caption,duration=duration,
+                                 thumb=thumb,supports_streaming=True,
+                                 file_name=f"wm_{int(time.time())}.mp4")
             if thumb: os.remove(thumb)
             await app.send_message(uid,"Done ✔️")
-        except Exception as e: await app.send_message(uid,f"Upload error: {e}")
+        except Exception as e:
+            await app.send_message(uid,f"Upload error: {e}")
+
         for p in (in_path,out_path):
             if os.path.exists(p): os.remove(p)
+
     sess.is_processing=False
 
 # ==================== BOT COMMANDS ====================
@@ -157,8 +217,11 @@ async def w(_,m):
 @app.on_message(filters.command("crf"))
 async def crf_cmd(_,m):
     sess=await get_session(m.from_user.id)
-    try: sess.crf=int(m.text.split()[1]); await m.reply(f"CRF updated → {sess.crf}")
-    except: await m.reply("Usage: /crf 21")
+    try:
+        sess.crf=int(m.text.split()[1])
+        await m.reply(f"CRF updated → {sess.crf}")
+    except:
+        await m.reply("Usage: /crf 21")
 
 @app.on_message(filters.command("res"))
 async def res_cmd(_,m):
@@ -168,7 +231,8 @@ async def res_cmd(_,m):
         if r not in [480,720,1080]: raise ValueError
         sess.resolution=r
         await m.reply(f"Resolution set → {r}p")
-    except: await m.reply("Usage: /res 480|720|1080")
+    except:
+        await m.reply("Usage: /res 480|720|1080")
 
 @app.on_message(filters.text & ~filters.command(["start","w","crf","res","cancel"]))
 async def text_msg(_,m):
