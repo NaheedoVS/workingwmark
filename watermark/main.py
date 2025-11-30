@@ -50,6 +50,14 @@ class UserSession:
     message_ids: List[int] = field(default_factory=list)
     user_message_ids: List[int] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
+    # Added missing fields for user settings
+    crf: int = field(default=watermark_config.CRF)
+    font_size: int = field(default=watermark_config.FONT_SIZE)
+    font_color: tuple = field(default=watermark_config.FONT_COLOR)
+    speed: int = field(default=50)
+    # Added for queue
+    queue: List[tuple] = field(default_factory=list)
+    is_processing: bool = False
 
     def add_bot_message(self, mid: int):
         if mid not in self.message_ids:
@@ -115,9 +123,10 @@ class Progress:
         pct = (cur / total) * 100
         bar = int(pct // 5) * "█" + (20 - int(pct // 5)) * "░"
         try:
-            await self.msg.edit_text(f"**{self.action}**
-            [{bar}] {pct:.1f}%
-            {format_size(cur)} / {format_size(total)}")
+            # Fixed: Use multiline f-string with triple quotes
+            await self.msg.edit_text(f"""**{self.action}**
+[{bar}] {pct:.1f}%
+{format_size(cur)} / {format_size(total)}""")
         except:
             pass
 
@@ -138,11 +147,6 @@ def get_font(size):
                 pass
     return ImageFont.load_default()
 
-
-def create_watermark_image(text):
-    return create_watermark_image_advanced(text, watermark_config.FONT_SIZE, watermark_config.FONT_COLOR)
-
-
 def create_watermark_image_advanced(text, font_size=40, font_color=(255,255,255,255)):
     font = get_font(font_size)
     dummy = Image.new("RGBA", (1, 1))
@@ -155,42 +159,27 @@ def create_watermark_image_advanced(text, font_size=40, font_color=(255,255,255,
     wm = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(wm)
 
-    d.rounded_rectangle((0, 0, w, h), radius=watermark_config.BOX_CORNER_RADIUS,
-                         fill=watermark_config.BOX_COLOR)
+    # Rounded rectangle (assuming ImageDraw has rounded_rectangle; if not, implement or use rectangle)
+    try:
+        d.rounded_rectangle((0, 0, w, h), radius=watermark_config.BOX_CORNER_RADIUS,
+                            fill=watermark_config.BOX_COLOR)
+    except AttributeError:
+        # Fallback to rectangle if rounded_rectangle not available in your PIL version
+        d.rectangle((0, 0, w, h), fill=watermark_config.BOX_COLOR)
 
     d.text((pad, pad - bbox[1]), text, font=font, fill=font_color)
     return wm
-(text):
-    font = get_font(watermark_config.FONT_SIZE)
-    dummy = Image.new("RGBA", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pad = watermark_config.BOX_PADDING
-
-    w, h = tw + pad * 2, th + pad * 2
-    wm = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(wm)
-
-    # Rounded rectangle
-    d.rounded_rectangle((0, 0, w, h), radius=watermark_config.BOX_CORNER_RADIUS,
-                         fill=watermark_config.BOX_COLOR)
-
-    d.text((pad, pad - bbox[1]), text, font=font, fill=watermark_config.FONT_COLOR)
-    return wm
 
 # ==============================================================
+# PURE FFMPEG VIDEO PROCESSING WITH ANIMATION + CRF + COLOR + FONT SIZE (LOW RAM)
 # ==============================================================
-# PURE FFMPEG VIDEO PROCESSING WITH ANIMATION + CRF + COLOR + FONT SIZE
-# ==============================================================
-
 def process_video(input_path, wm_text, output_path, crf=watermark_config.CRF,
                   move_speed=50, font_color=watermark_config.FONT_COLOR,
                   font_size=watermark_config.FONT_SIZE):
     """
     Animated watermark using FFmpeg only (VERY low RAM).
 
-    Features added:
+    Features:
     - Moving watermark: x=(t*move_speed) % (W-w)
     - CRF quality control
     - Dynamic font size
@@ -244,51 +233,6 @@ def process_video(input_path, wm_text, output_path, crf=watermark_config.CRF,
 
     except Exception as e:
         return False, str(e)
- (LOW RAM)
-# ==============================================================
-def process_video(input_path, wm_text, output_path):
-    try:
-        logger.info(f"Processing video (FFmpeg): {input_path}")
-
-        # Save watermark as PNG
-        wm_img = create_watermark_image(wm_text)
-        wm_tmp = os.path.join(bot_config.OUTPUT_DIR, f"wm_{int(time.time())}.png")
-        wm_img.save(wm_tmp)
-
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-i", wm_tmp,
-            "-filter_complex",
-            f"overlay=W-w-{watermark_config.MARGIN}:H-h-{watermark_config.MARGIN}",
-            "-c:v", watermark_config.VIDEO_CODEC,
-            "-preset", watermark_config.VIDEO_PRESET,
-            "-c:a", "copy",
-            output_path
-        ]
-
-        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-        try:
-            os.remove(wm_tmp)
-        except:
-            pass
-
-        if result.returncode != 0:
-            logger.error(result.stderr)
-            return False, "FFmpeg failed to process video"
-
-        if not os.path.exists(output_path):
-            return False, "Output not created"
-
-        size = os.path.getsize(output_path)
-        if size > bot_config.MAX_FILE_SIZE:
-            return False, f"Output too large: {format_size(size)}"
-
-        return True, None
-
-    except Exception as e:
-        return False, str(e)
 
 # ==============================================================
 # IMAGE PROCESSING
@@ -296,7 +240,7 @@ def process_video(input_path, wm_text, output_path):
 def process_image(input_path, text, output_path):
     try:
         img = Image.open(input_path).convert("RGBA")
-        wm = create_watermark_image(text)
+        wm = create_watermark_image_advanced(text)  # Use advanced version
         x = img.width - wm.width - watermark_config.MARGIN
         y = img.height - wm.height - watermark_config.MARGIN
         img.paste(wm, (x, y), wm)
@@ -305,6 +249,68 @@ def process_image(input_path, text, output_path):
     except Exception as e:
         logger.error(e)
         return False
+
+# ==============================================================
+# ASYNC DOWNLOAD HELPERS
+# ==============================================================
+async def download_media(client: Client, msg: Message, progress: Progress):
+    file_path = os.path.join(bot_config.OUTPUT_DIR, f"media_{int(time.time())}.tmp")
+    if msg.photo:
+        await client.download_media(msg.photo, file_path, progress=progress)
+        return file_path, "photo"
+    elif msg.video:
+        await client.download_media(msg.video, file_path, progress=progress)
+        return file_path, "video"
+    elif msg.document:
+        await client.download_media(msg.document, file_path, progress=progress)
+        return file_path, "document"
+    return None, None
+
+# ==============================================================
+# QUEUE WORKER
+# ==============================================================
+async def video_queue_worker(user_id):
+    sess = await session_manager.get(user_id)
+    if sess.is_processing:
+        return
+    sess.is_processing = True
+
+    while sess.queue:
+        job = sess.queue.pop(0)
+        input_path, text = job
+        out_path = input_path.replace('.tmp', '_done.mp4').replace('.jpg', '_done.jpg')  # Handle both
+
+        if 'video' in sess.file_type:
+            ok, err = process_video(
+                input_path,
+                text,
+                out_path,
+                crf=sess.crf,
+                move_speed=sess.speed,
+                font_color=sess.font_color,
+                font_size=sess.font_size
+            )
+        else:
+            ok = process_image(input_path, text, out_path)
+            err = None if ok else "Image processing failed"
+
+        if not ok:
+            await app.send_message(user_id, f"❌ Failed: {err}")
+        else:
+            if 'video' in sess.file_type:
+                await app.send_video(user_id, out_path)
+            else:
+                await app.send_photo(user_id, out_path)
+            try:
+                os.remove(out_path)
+            except:
+                pass
+        try:
+            os.remove(input_path)
+        except:
+            pass
+
+    sess.is_processing = False
 
 # ==============================================================
 # PYROGRAM BOT
@@ -318,84 +324,6 @@ app = Client(
 
 # ==============================================================
 # COMMANDS
-# ================= USER SETTINGS COMMANDS =================
-# CRF setter
-@app.on_message(filters.command("crf"))
-async def set_crf_cmd(client, msg):
-    sess = await session_manager.get(msg.from_user.id)
-    try:
-        value = int(msg.text.split()[1])
-        sess.crf = value
-        await msg.reply_text(f"CRF set to {value}")
-    except:
-        await msg.reply_text("Usage: /crf 22")
-
-# Font size
-@app.on_message(filters.command("size"))
-async def set_size_cmd(client, msg):
-    sess = await session_manager.get(msg.from_user.id)
-    try:
-        value = int(msg.text.split()[1])
-        sess.font_size = value
-        await msg.reply_text(f"Font size set to {value}")
-    except:
-        await msg.reply_text("Usage: /size 48")
-
-# Color hex
-@app.on_message(filters.command("color"))
-async def set_color_cmd(client, msg):
-    sess = await session_manager.get(msg.from_user.id)
-    try:
-        hexcode = msg.text.split()[1].lstrip('#')
-        r,g,b = tuple(int(hexcode[i:i+2],16) for i in (0,2,4))
-        sess.font_color = (r,g,b,255)
-        await msg.reply_text(f"Color set to #{hexcode.upper()}")
-    except:
-        await msg.reply_text("Usage: /color FF00FF")
-
-# Speed
-@app.on_message(filters.command("speed"))
-async def set_speed_cmd(client, msg):
-    sess = await session_manager.get(msg.from_user.id)
-    try:
-        value = int(msg.text.split()[1])
-        sess.speed = value
-        await msg.reply_text(f"Animation speed set to {value}")
-    except:
-        await msg.reply_text("Usage: /speed 60")
-
-# ================= QUEUE SYSTEM =================
-async def video_queue_worker(user_id):
-    sess = await session_manager.get(user_id)
-    if getattr(sess, "is_processing", False):
-        return
-    sess.is_processing = True
-
-    while getattr(sess, "queue", []):
-        job = sess.queue.pop(0)
-        input_path, text = job
-        out_path = input_path.replace('.mp4','_done.mp4')
-
-        ok, err = process_video(
-            input_path,
-            text,
-            out_path,
-            crf=getattr(sess, "crf", watermark_config.CRF),
-            move_speed=getattr(sess, "speed", 50),
-            font_color=getattr(sess, "font_color", watermark_config.FONT_COLOR),
-            font_size=getattr(sess, "font_size", watermark_config.FONT_SIZE)
-        )
-
-        if not ok:
-            await app.send_message(user_id, f"❌ Failed: {err}")
-        else:
-            await app.send_video(user_id, out_path)
-            try: os.remove(out_path)
-            except: pass
-        try: os.remove(input_path)
-        except: pass
-
-    sess.is_processing = False
 # ==============================================================
 @app.on_message(filters.command("start"))
 async def start_cmd(client, msg):
@@ -407,6 +335,7 @@ async def start_cmd(client, msg):
 @app.on_message(filters.command("w"))
 async def w_cmd(client, msg):
     sess = await session_manager.get(msg.from_user.id)
+    sess.reset()
     sess.step = "waiting_text"
     r = await msg.reply_text("✏️ Send the watermark text:")
     sess.add_bot_message(r.id)
@@ -433,11 +362,74 @@ async def media_handler(client, msg):
     sess = await session_manager.get(msg.from_user.id)
     sess.add_user_message(msg.id)
 
-    if sess.step != "waiting_media":
+    if sess.step != "waiting_media" or not sess.watermark_text:
         return await msg.reply_text("Use /w first.")
 
-    # Identify file
-    if msg.photo:
-        f = msg.photo
-        ftype = "photo"
-        ext
+    # Progress message
+    prog_msg = await msg.reply_text("⬇️ Downloading...")
+    progress = Progress(prog_msg, "Downloading")
+
+    # Download file
+    file_path, ftype = await download_media(client, msg, progress)
+    if not file_path:
+        return await prog_msg.edit_text("❌ Failed to download media.")
+
+    sess.downloaded_file_path = file_path
+    sess.file_type = ftype
+    await prog_msg.edit_text("🔄 Processing...")
+
+    # Queue the job
+    sess.queue.append((file_path, sess.watermark_text))
+    asyncio.create_task(video_queue_worker(msg.from_user.id))
+
+    # Reset session after queuing
+    sess.reset(keep_file=True)
+    await prog_msg.edit_text("✅ Queued for processing!")
+
+# ================= USER SETTINGS COMMANDS =================
+@app.on_message(filters.command("crf"))
+async def set_crf_cmd(client, msg):
+    sess = await session_manager.get(msg.from_user.id)
+    try:
+        value = int(msg.text.split()[1])
+        sess.crf = value
+        await msg.reply_text(f"CRF set to {value}")
+    except:
+        await msg.reply_text("Usage: /crf 22")
+
+@app.on_message(filters.command("size"))
+async def set_size_cmd(client, msg):
+    sess = await session_manager.get(msg.from_user.id)
+    try:
+        value = int(msg.text.split()[1])
+        sess.font_size = value
+        await msg.reply_text(f"Font size set to {value}")
+    except:
+        await msg.reply_text("Usage: /size 48")
+
+@app.on_message(filters.command("color"))
+async def set_color_cmd(client, msg):
+    sess = await session_manager.get(msg.from_user.id)
+    try:
+        hexcode = msg.text.split()[1].lstrip('#')
+        r, g, b = tuple(int(hexcode[i:i+2], 16) for i in (0, 2, 4))
+        sess.font_color = (r, g, b, 255)
+        await msg.reply_text(f"Color set to #{hexcode.upper()}")
+    except:
+        await msg.reply_text("Usage: /color FF00FF")
+
+@app.on_message(filters.command("speed"))
+async def set_speed_cmd(client, msg):
+    sess = await session_manager.get(msg.from_user.id)
+    try:
+        value = int(msg.text.split()[1])
+        sess.speed = value
+        await msg.reply_text(f"Animation speed set to {value}")
+    except:
+        await msg.reply_text("Usage: /speed 60")
+
+# ==============================================================
+# RUN BOT
+# ==============================================================
+if __name__ == "__main__":
+    app.run()
