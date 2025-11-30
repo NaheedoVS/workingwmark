@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 
-# Watermark Bot – Pop-up Animated Watermark + Resolution Support + Bug Fixes
+# Watermark Bot – Pop-up Animated Watermark + Original Dimensions + Reduced Background
 
 import os, time, json, asyncio, logging, subprocess, random
 from dataclasses import dataclass, field
 from typing import List, Tuple
-from PIL import Image, ImageDraw, ImageFont
-
+from PIL import Image, ImageDraw, ImageFont, ImageResampling
 from pyrogram import Client, filters
 
 # ==================== CONFIG ====================
-
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -20,7 +18,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== SESSION ====================
-
 @dataclass
 class UserSession:
     user_id: int
@@ -29,7 +26,7 @@ class UserSession:
     queue: List[Tuple[str, str, str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 21
-    resolution: int = 720   # default
+    resolution: int = 720  # default resolution
 
     def reset(self):
         self.step = "waiting_text"
@@ -44,20 +41,15 @@ async def get_session(uid):
         return session_manager.setdefault(uid, UserSession(uid))
 
 # ==================== DOWNLOAD PROGRESS ====================
-
 async def download_progress(cur, tot, msg):
     pct = int(cur * 100 / tot)
-    if getattr(download_progress, "last", -1) == pct:
-        return
+    if getattr(download_progress, "last", -1) == pct: return
     download_progress.last = pct
-    bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
-    try:
-        await msg.edit_text(f"Downloading...\n[{bar}] {pct}%")
-    except:
-        pass
+    bar = "█" * (pct//5) + "░" * (20-pct//5)
+    try: await msg.edit_text(f"Downloading...\n[{bar}] {pct}%")
+    except: pass
 
 # ==================== WATERMARK CREATION ====================
-
 def create_watermark(text: str, scale=0.7):
     font = ImageFont.load_default()
     for p in ["fonts/Roboto-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
@@ -68,66 +60,51 @@ def create_watermark(text: str, scale=0.7):
             except:
                 pass
 
-    dummy = Image.new("RGBA", (1, 1))
+    dummy = Image.new("RGBA", (1,1))
     d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font)
+    bbox = d.textbbox((0,0), text, font=font)
+    padding_x, padding_y = 20, 10
+    w, h = bbox[2]-bbox[0] + padding_x, bbox[3]-bbox[1] + padding_y
 
-    padding_x = 20
-    padding_y = 10
-    w = bbox[2] - bbox[0] + padding_x
-    h = bbox[3] - bbox[1] + padding_y
-
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 180))
+    img = Image.new("RGBA", (w,h), (0,0,0,0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=10, fill=(0, 0, 0, 180))
-    draw.text((padding_x // 2, padding_y // 2), text, font=font, fill=(255, 255, 255))
+    draw.rounded_rectangle((0,0,w-1,h-1), radius=10, fill=(0,0,0,180))
+    draw.text((padding_x//2, padding_y//2), text, font=font, fill=(255,255,255,255))
 
+    # Resize watermark using modern Pillow
     new_w = int(img.width * scale)
     new_h = int(img.height * scale)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    img = img.resize((new_w, new_h), ImageResampling.LANCZOS)
     return img
 
 # ==================== VIDEO PROCESSING ====================
-
 def process_video(in_path, text, out_path, crf=21, resolution=720):
     try:
         wm = create_watermark(text, scale=0.7)
         wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
 
-        # 10 random watermark positions
+        # Generate random positions for animation
         positions = []
         for _ in range(10):
-            positions.append((
-                random.randint(0, 1280 - wm.width),
-                random.randint(0, 720 - wm.height)
-            ))
+            positions.append((random.randint(0, 1280 - wm.width), random.randint(0, 720 - wm.height)))
 
-        filter_parts = [
-            f"[0:v]scale=-2:{resolution}[scaled]"
-        ]
-
-        prev = "[scaled]"
+        duration_per_pos = 5
+        overlay_filters = []
+        prev = f"[0:v]scale=-2:{resolution}[scaled]"
         for i, (x, y) in enumerate(positions):
-            out = f"[wm{i}]"
-            start = i * 5
-            end = start + 5
-            filter_parts.append(
-                f"{prev}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})'{out}"
-            )
-            prev = out
+            overlay_filters.append(f"[{prev if i==0 else f'wm{i-1}'}][1:v]overlay=x={x}:y={y}:enable='between(t,{i*duration_per_pos},{(i+1)*duration_per_pos})'[wm{i}]")
+            prev = f"wm{i}"
 
-        # FINAL LABEL (IMPORTANT FIX)
-        filter_parts.append(f"{prev}[final]")
-
-        filter_complex = ";".join(filter_parts)
+        # Correct final mapping
+        filter_complex = f"{';'.join(overlay_filters)};[{prev}][0:v]null[outv]"
 
         cmd = [
             "ffmpeg", "-y",
             "-i", in_path,
             "-i", wm_path,
             "-filter_complex", filter_complex,
-            "-map", "[final]",
+            "-map", "[outv]",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "fast",
@@ -152,11 +129,10 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         return False
 
 # ==================== DURATION & THUMB ====================
-
 def get_duration(path):
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "json", path],
+            ["ffprobe","-v","quiet","-show_entries","format=duration","-of","json",path],
             capture_output=True, text=True, timeout=15
         )
         return round(float(json.loads(r.stdout)["format"]["duration"]))
@@ -166,40 +142,32 @@ def get_duration(path):
 def make_thumb(path):
     t = f"/tmp/thumb_{int(time.time())}.jpg"
     subprocess.run(
-        ["ffmpeg", "-y", "-i", path, "-ss", "10", "-vframes", "1", "-vf", "scale=640:-2", t],
+        ["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale=640:-2",t],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
     )
     return t if os.path.exists(t) else None
 
 # ==================== WORKER ====================
-
 async def worker(uid):
     sess = await get_session(uid)
-    if sess.is_processing:
-        return
-
+    if sess.is_processing: return
     sess.is_processing = True
 
     while sess.queue:
         in_path, text, typ = sess.queue.pop(0)
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
 
-        status = await app.send_message(uid, "Processing video + watermark...")
+        status = await app.send_message(uid, f"Processing video + watermark...")
 
         success = process_video(in_path, text, out_path, sess.crf, sess.resolution)
         await status.delete()
 
         if not success or not os.path.exists(out_path):
             await app.send_message(uid, "Processing failed ❌")
-            if os.path.exists(in_path):
-                os.remove(in_path)
+            if os.path.exists(in_path): os.remove(in_path)
             continue
 
-        caption = (
-            f"Watermark: {text}\n"
-            f"CRF: {sess.crf}\n"
-            f"Resolution: {sess.resolution}p"
-        )
+        caption = f"Watermark: {text}\nCRF: {sess.crf}\nResolution: {sess.resolution}p"
 
         try:
             thumb = make_thumb(out_path)
@@ -209,35 +177,30 @@ async def worker(uid):
                 uid, out_path,
                 caption=caption,
                 duration=duration,
-                supports_streaming=True,
                 thumb=thumb,
+                supports_streaming=True,
                 file_name=f"wm_{int(time.time())}.mp4"
             )
-            if thumb:
-                os.remove(thumb)
-
+            if thumb: os.remove(thumb)
             await app.send_message(uid, "Done ✔️")
-
         except Exception as e:
             await app.send_message(uid, f"Upload error: {e}")
 
         for p in (in_path, out_path):
-            if os.path.exists(p):
-                os.remove(p)
+            if os.path.exists(p): os.remove(p)
 
     sess.is_processing = False
 
 # ==================== BOT COMMANDS ====================
-
 app = Client("wm_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir="/tmp")
 
 @app.on_message(filters.command("start"))
 async def start(_, m):
     await m.reply(
         "**Watermark Bot**\n"
-        "• Moving watermark every 5s\n"
+        "• Pop-up watermark every 5s\n"
         "• Set CRF → /crf 21\n"
-        "• Set Resolution → /res 720\n"
+        "• Set Resolution → /resolution 480|720|1080\n"
         "Start with /w"
     )
 
@@ -256,23 +219,22 @@ async def crf(_, m):
     except:
         await m.reply("Usage: /crf 21")
 
-@app.on_message(filters.command("res"))
-async def res(_, m):
+@app.on_message(filters.command("resolution"))
+async def resolution(_, m):
     sess = await get_session(m.from_user.id)
     try:
-        value = int(m.text.split()[1])
-        if value not in (480, 720, 1080):
-            return await m.reply("❌ Invalid resolution. Use **480**, **720**, or **1080**")
-        sess.resolution = value
-        await m.reply(f"Resolution set to **{value}p** ✔️")
+        res = int(m.text.split()[1])
+        if res not in [480, 720, 1080]:
+            raise ValueError
+        sess.resolution = res
+        await m.reply(f"Resolution set → {res}p")
     except:
-        await m.reply("Usage: /res 720")
+        await m.reply("Usage: /resolution 480|720|1080")
 
-@app.on_message(filters.text & ~filters.command(["start", "w", "crf", "res", "cancel"]))
+@app.on_message(filters.text & ~filters.command(["start","w","crf","cancel","resolution"]))
 async def text(_, m):
     sess = await get_session(m.from_user.id)
-    if sess.step != "waiting_text":
-        return
+    if sess.step != "waiting_text": return
     sess.watermark_text = m.text.strip()
     sess.step = "waiting_media"
     await m.reply("Now send video 🎥")
@@ -292,7 +254,7 @@ async def media(c, m):
 
     sess.queue.append((path, sess.watermark_text, "video"))
     asyncio.create_task(worker(m.from_user.id))
-    await m.reply(f"Queued | CRF {sess.crf} | {sess.resolution}p")
+    await m.reply(f"Queued | CRF {sess.crf} | Resolution {sess.resolution}p")
 
 @app.on_message(filters.command("cancel"))
 async def cancel(_, m):
@@ -302,7 +264,6 @@ async def cancel(_, m):
     await m.reply("Cancelled ✔")
 
 # ==================== RUN ====================
-
 if __name__ == "__main__":
     print("Watermark Bot Running…")
     app.run()
