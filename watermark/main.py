@@ -26,8 +26,8 @@ class UserSession:
     queue: List[Tuple[str, str, str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 21
-    quality: int = 720       # New: 480 / 720 / 1080
-    speed: int = 60          # For animated watermark
+    quality: int = 720       # 480 / 720 / 1080
+    speed: int = 60          # Animated watermark speed
 
     def reset(self):
         self.step = "waiting_text"
@@ -76,27 +76,24 @@ def create_watermark(text: str):
 # ==================== MAIN PROCESSING ====================
 def process_video(in_path, text, out_path, crf=21, speed=60, quality=720):
     try:
-        # Set output scaling based on quality
-        if quality == 480:
-            width, height = 854, 480
-        elif quality == 1080:
-            width, height = 1920, 1080
-        else:
-            width, height = 1280, 720
+        # Output size
+        if quality == 480: width, height = 854, 480
+        elif quality == 1080: width, height = 1920, 1080
+        else: width, height = 1280, 720
 
         wm = create_watermark(text)
         wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
 
-        # Anti-freeze overlay expression
+        # Filter with final [v] label
         filter_complex = (
             f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[bg];"
             "[1:v]format=yuva444p,colorchannelmixer=aa=0.80[wm];"
-            "[bg][wm]overlay="
+            f"[bg][wm]overlay="
             "x='40+mod(t*{speed},(main_w-overlay_w-80))':"
             "y='main_h-overlay_h-30-mod(t*{speed}*0.6,(main_h-overlay_h-60))':"
-            "format=auto:repeatlast=0"
+            "format=auto:repeatlast=0[v]"
         ).format(speed=speed)
 
         cmd = [
@@ -104,6 +101,8 @@ def process_video(in_path, text, out_path, crf=21, speed=60, quality=720):
             "-i", in_path,
             "-i", wm_path,
             "-filter_complex", filter_complex,
+            "-map", "[v]",       # FIXED: use filtered video
+            "-map", "0:a?",      # keep audio if exists
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", str(crf),
@@ -112,8 +111,6 @@ def process_video(in_path, text, out_path, crf=21, speed=60, quality=720):
             "-c:a", "aac",
             "-b:a", "192k",
             "-movflags", "+faststart",
-            "-map", "0:v:0",      # FIX: never freeze
-            "-map", "0:a?",       # safe audio mapping
             out_path
         ]
 
@@ -160,7 +157,6 @@ async def worker(uid):
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
 
         status = await app.send_message(uid, f"Processing {sess.quality}p + watermark...")
-
         success = process_video(in_path, text, out_path, sess.crf, sess.speed, sess.quality)
         await status.delete()
 
@@ -270,4 +266,3 @@ async def cancel(_, m):
 if __name__ == "__main__":
     print("Watermark Bot Running…")
     app.run()
-    
