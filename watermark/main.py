@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # FINAL 720p Watermark Bot – SMALL WATERMARK + NO FREEZE + NO CRASH
-# Tested live on Heroku right now → works perfectly
 
 import os, time, json, asyncio, logging, subprocess
 from dataclasses import dataclass, field
@@ -68,32 +67,38 @@ def create_watermark(text: str):
     draw.text((30, 10), text, font=font, fill=(255,255,255,255))
     return img
 
-# ==================== BULLETPROOF PROCESSING – NO FREEZE ====================
+# ==================== FIXED PROCESSOR – NO FREEZE ====================
 def process_video(in_path, text, out_path, crf=21, speed=70):
     try:
         wm = create_watermark(text)
         wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
 
+        # ⭐ FIXED OVERLAY – no freeze
         filter_complex = (
             "[0:v]scale=1280:720:force_original_aspect_ratio=decrease:flags=lanczos,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,"
-            "setsar=1[bg];"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,setsar=1[bg];"
             "[1:v]format=yuva444p,colorchannelmixer=aa=0.78[wm];"
             "[bg][wm]overlay="
-            "x='40+mod(t*{speed},W-w-80)':"
-            "y='H-h-30-mod(t*{speed}*0.6,H-h-60)':"
-            "shortest=1"
+            "x='40+mod(t*{speed},(main_w-overlay_w-80))':"
+            "y='main_h-overlay_h-30-mod(t*{speed}*0.6,(main_h-overlay_h-60))':"
+            "format=auto:repeatlast=0"
         ).format(speed=speed)
 
         cmd = [
-            "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
+            "ffmpeg", "-y",
+            "-i", in_path,
+            "-i", wm_path,
             "-filter_complex", filter_complex,
             "-c:v", "libx264", "-preset", "fast", "-crf", str(crf),
             "-maxrate", "5000k", "-bufsize", "10000k",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
-            "-map", "0:a?", out_path
+
+            # ⭐ FIXED MAPPING – prevents first-frame freeze
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            out_path
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=21600)
@@ -102,7 +107,9 @@ def process_video(in_path, text, out_path, crf=21, speed=70):
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
             return False
+
         return os.path.getsize(out_path) > 200000
+
     except Exception as e:
         logger.error(f"Error: {e}")
         return False
@@ -189,7 +196,7 @@ async def crf(_, m):
     except:
         await m.reply("Usage: /crf 21")
 
-# Fixed filter – now accepts all text that is NOT a command
+# Accept all text except commands
 @app.on_message(filters.text & ~filters.command(["start", "w", "crf", "cancel"]))
 async def text(_, m):
     sess = await get_session(m.from_user.id)
