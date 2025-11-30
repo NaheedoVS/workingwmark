@@ -370,7 +370,7 @@ async def video_queue_worker(user_id):
                     merge_msg = f"""🔗 **To merge parts into one video:**
 
 Run this command in terminal (install FFmpeg first from ffmpeg.org):
-        
+                             
 Or use free tools like:
 - HandBrake (GUI): Import parts → Queue → Merge.
 - Online: Clideo or Kapwing (upload parts → combine).
@@ -401,6 +401,9 @@ app = Client(
     bot_token=telegram_config.BOT_TOKEN,
 )
 
+# Define all bot commands for exclusion
+ALL_COMMANDS = ["start", "w", "crf", "size", "color", "speed"]
+
 # ==============================================================
 # COMMANDS
 # ==============================================================
@@ -419,7 +422,7 @@ async def w_cmd(client, msg):
     r = await msg.reply_text("✏️ Send the watermark text:")
     sess.add_bot_message(r.id)
 
-@app.on_message(filters.text & ~filters.command())
+@app.on_message(filters.text & ~filters.command(commands=ALL_COMMANDS))
 async def text_handler(client, msg):
     sess = await session_manager.get(msg.from_user.id)
     sess.add_user_message(msg.id)
