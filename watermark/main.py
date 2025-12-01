@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Stretched Text + Tight Box + Bottom Right
+# Async Watermark Bot – High Quality 1:1 Resolution Match
 
 import os
 import time
@@ -77,48 +77,49 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (Stretched & Tight) ====================
-def create_watermark(text: str) -> str:
-    # 1. BASE SETTINGS
-    # We start with a base size, then stretch it.
-    base_font_size = 40 
+# ==================== IMAGE PROCESSING (High Res 1:1 Match) ====================
+def create_watermark(text: str, target_video_height: int) -> str:
+    # 1. DYNAMIC FONT SIZE
+    # Instead of a fixed number, we calculate size based on video height.
+    # This guarantees the text is sharp at 720p, 1080p, or 4k.
+    # Division by 18 gives a good visual size (approx 5.5% of screen height).
+    base_font_size = int(target_video_height // 18) 
+    
     try:
         font = ImageFont.truetype(FONT_PATH, base_font_size)
     except:
         font = ImageFont.load_default()
 
-    # 2. CREATE TEXT ONLY LAYER
-    # Determine base size
+    # 2. CREATE TEXT LAYER
     dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
     bbox = dummy_draw.textbbox((0, 0), text, font=font, stroke_width=0)
     w_base = bbox[2] - bbox[0]
     h_base = bbox[3] - bbox[1]
 
-    # Draw text on a transparent image first
-    # Add small buffer to prevent clipping
-    text_img = Image.new("RGBA", (w_base, h_base + 10), (0,0,0,0))
+    # Draw text on transparent layer
+    text_img = Image.new("RGBA", (w_base, h_base + 20), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
     
-    # Draw White Text (Reduced Thickness: stroke_width=0)
+    # Draw White Text (No stroke = Cleanest quality)
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
     
-    # Trim the text image to exact content to handle resizing accurately
+    # Crop to exact text content
     text_bbox = text_img.getbbox()
     if text_bbox:
         text_img = text_img.crop(text_bbox)
 
     # 3. APPLY DISTORTION (Width 2x, Height 1.5x)
     current_w, current_h = text_img.size
-    new_w = int(current_w * 2.0) # Width 2x
-    new_h = int(current_h * 1.5) # Height 1.5x
+    new_w = int(current_w * 2.0)
+    new_h = int(current_h * 1.5)
     
-    # Resample with LANCZOS for high quality scaling
+    # Use LANCZOS filter for the highest quality resize
     text_img = text_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # 4. BACKGROUND BOX (Reduced Size / Tight)
-    # Reduced padding to 16px horizontal, 8px vertical
-    padding_x = 16 
-    padding_y = 8  
+    # 4. BACKGROUND BOX (Tight)
+    # Scale padding relative to resolution too so it doesn't look huge/tiny
+    padding_x = int(base_font_size * 0.4) 
+    padding_y = int(base_font_size * 0.2)
     
     final_w = new_w + (padding_x * 2)
     final_h = new_h + (padding_y * 2)
@@ -133,11 +134,9 @@ def create_watermark(text: str) -> str:
         fill=(0, 0, 0, 180) 
     )
     
-    # Paste the distorted text onto the center of the background
+    # Paste Text
     paste_x = (final_w - new_w) // 2
     paste_y = (final_h - new_h) // 2
-    
-    # Paste using the text image itself as the mask (3rd argument) to keep transparency
     final_img.paste(text_img, (paste_x, paste_y), text_img)
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
@@ -165,15 +164,18 @@ async def get_video_meta(path):
 async def process_video(in_path, text, out_path, crf, resolution, mode="static"):
     wm_path = None
     try:
-        wm_path = create_watermark(text)
+        # Pass the resolution to create_watermark so we generate EXACT pixels
+        wm_path = create_watermark(text, resolution)
         
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
             # ================= STATIC MODE (BOTTOM RIGHT) =================
-            # W-w-25:H-h-70 (Standard Instagram-safe bottom right)
-            filter_complex += f"{last_stream}[1:v]overlay=W-w-25:H-h-70"
+            # Dynamic margins based on resolution (approx 3.5% of height)
+            margin = int(resolution * 0.035)
+            # W-w-margin:H-h-margin
+            filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         
         else:
             # ================= ANIMATED MODE =================
@@ -181,6 +183,8 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="static")
             wm_w, wm_h = wm_img.size
             in_w, in_h = await get_video_meta(in_path)
             
+            # Since we generate WM based on target resolution, we assume [bg] is target resolution.
+            # We just calculate bounds based on that.
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
             max_x = max(0, scaled_w - wm_w - 5)
@@ -283,7 +287,7 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot (Rounded Style)**\n\n"
+        "**👋 Watermark Bot (High Quality)**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
         "2. **/w** - Animated Watermark (Pop-up)\n"
         "3. **/settings** - Check config\n"
