@@ -92,10 +92,10 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = float(json.loads(r.stdout)["format"]["duration"])
         duration = max(1, int(duration))
 
-        # Animated watermark: move every 10s with fade in/out
+        # Animated watermark: jumps every 10 seconds (no diagonal movement)
         block = 10
         num_blocks = max(1, (duration // block) + 1)
-        overlays = []
+        filter_chain = ""
         last_map = "[0:v]"
 
         for i in range(num_blocks):
@@ -103,12 +103,11 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             y = random.randint(0, max(0, resolution - wm.height))
             start = i * block
             end = min((i + 1) * block, duration)
-            overlays.append(
-                f"{last_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})'[v{i}];"
-            )
-            last_map = f"[v{i}]"
+            next_map = f"[v{i}]" if i < num_blocks - 1 else ""
+            filter_chain += f"{last_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})'{next_map};"
+            last_map = next_map if next_map else last_map
 
-        filter_chain = "".join(overlays).rstrip(";")
+        filter_chain = filter_chain.rstrip(";")
 
         cmd = [
             "ffmpeg", "-y",
