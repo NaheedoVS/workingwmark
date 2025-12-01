@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Watermark Bot – Dual Mode (Static + Slide) + Progress Bars
+# Watermark Bot – Dual Mode (Static + Slide) + Buffer Fix
 
 import os, time, json, asyncio, logging, shutil, re
 from dataclasses import dataclass, field
@@ -42,7 +42,6 @@ class UserSession:
     is_processing: bool = False
     crf: int = 21
     resolution: int = 720
-    # New: 'static' or 'slide'
     style: str = "static"
 
     def reset(self):
@@ -102,7 +101,7 @@ def time_to_seconds(time_str):
     except: return 0
 
 async def get_duration(path):
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]
+    cmd = [FFMPEG_BIN, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, _ = await proc.communicate()
     try: return float(out.decode().strip())
@@ -110,7 +109,7 @@ async def get_duration(path):
 
 async def generate_thumbnail(in_path):
     out = f"{in_path}.jpg"
-    cmd = [FFMPEG_BIN, "-y", "-i", in_path, "-ss", "00:00:02", "-vframes", "1", "-vf", "scale=320:-1", out]
+    cmd = [FFMPEG_BIN, "-y", "-hide_banner", "-loglevel", "error", "-i", in_path, "-ss", "00:00:02", "-vframes", "1", "-vf", "scale=320:-1", out]
     await (await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)).wait()
     return out if os.path.exists(out) else None
 
@@ -129,36 +128,43 @@ async def process_video(in_path, text, out_path, crf, resolution, style, status_
 
         # 2. Determine Style
         if style == "slide":
-            # Left to Right Animation over 30 seconds
             overlay_cmd = "x='-w+((W+w)*((mod(t,30))/30))':y=H-h-20"
         else:
-            # Static Bottom Right
             overlay_cmd = "x=W-w-20:y=H-h-20"
 
         # 3. Build Filter
         filter_chain = f"[0:v]scale=-2:{resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
 
+        # Added -hide_banner, -loglevel error, -stats to prevent buffer overflow
         cmd = [
-            FFMPEG_BIN, "-y", "-i", in_path, "-i", wm_path,
+            FFMPEG_BIN, "-y", "-hide_banner", "-loglevel", "error", "-stats",
+            "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_chain,
             "-c:v", "libx264", "-preset", "fast", "-crf", str(crf),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
             out_path
         ]
 
+        # Added limit=1024*1024 (1MB) to handle large output lines if they occur
         process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024 
         )
 
         # 4. Monitor Progress
         while True:
-            line = await process.stderr.readline()
-            if not line: break
-            line_str = line.decode('utf-8', errors='ignore')
-            match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line_str)
-            if match and total_duration > 0:
-                cur = time_to_seconds(match.group(1))
-                await progress_bar(cur, total_duration, status_msg, "Processing")
+            try:
+                line = await process.stderr.readline()
+                if not line: break
+                
+                line_str = line.decode('utf-8', errors='ignore')
+                match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line_str)
+                if match and total_duration > 0:
+                    cur = time_to_seconds(match.group(1))
+                    await progress_bar(cur, total_duration, status_msg, "Processing")
+            except asyncio.LimitOverrunError:
+                # If a line is still too long, skip it to prevent crash
+                continue
 
         await process.wait()
         return process.returncode == 0 and os.path.exists(out_path)
@@ -183,7 +189,6 @@ async def queue_worker(uid):
             
             dur = await get_duration(in_path)
             
-            # Pass 'sess.style' to processor
             success = await process_video(in_path, sess.watermark_text, out_path, sess.crf, sess.resolution, sess.style, status, dur)
             
             if success:
@@ -199,7 +204,7 @@ async def queue_worker(uid):
                 
                 if thumb and os.path.exists(thumb): os.remove(thumb)
             else:
-                await status.edit_text("❌ Processing Failed.")
+                await status.edit_text("❌ Processing Failed. Check logs.")
             
             if os.path.exists(in_path): os.remove(in_path)
             if os.path.exists(out_path): os.remove(out_path)
@@ -230,7 +235,6 @@ async def w_cmd(_, m):
 async def mode_cmd(_, m):
     sess = await get_session(m.from_user.id)
     try:
-        # Clean input to match expected values
         mode = m.text.split()[1].lower()
         if mode in ["static", "slide"]:
             sess.style = mode
