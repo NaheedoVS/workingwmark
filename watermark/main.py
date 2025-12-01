@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 # Watermark Bot – Animated Watermark for full video
 
 import os, time, json, asyncio, logging, subprocess, random
@@ -27,10 +27,11 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
-    queue: List[Tuple[str,str,str]] = field(default_factory=list)
+    queue: List[Tuple[str,str,str,str]] = field(default_factory=list) # Added space for wm_mode in tuple
     is_processing: bool = False
     crf: int = 21
     resolution: int = 720
+    wm_mode: str = "animated" # New: "animated" or "static"
 
     def reset(self):
         self.step = "waiting_text"
@@ -77,9 +78,8 @@ def create_watermark(text:str, scale=0.595):
     new_w,new_h = int(w*scale),int(h*scale)
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
-# ==================== VIDEO PROCESSING (FIX APPLIED HERE) ====================
 # ==================== VIDEO PROCESSING (FINAL FIX APPLIED) ====================
-def process_video(in_path, text, out_path, crf=21, resolution=720):
+def process_video(in_path, text, out_path, crf=21, resolution=720, wm_mode="animated"):
     try:
         # Create watermark PNG
         wm = create_watermark(text)
@@ -95,57 +95,66 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = float(json.loads(r.stdout)["format"]["duration"])
         duration = max(1, int(duration))
 
-        # ================================
-        # RANDOM POSITIONS + 10 SEC BLOCKS
-        # ================================
-        POSITIONS = 10
-        INTERVAL = 10
+        # ============================================
+        # Define Filter Complex based on Mode
+        # ============================================
+        
+        # 1. Start with scaling the input video [0:v] to [main_v]
+        scale_filter = f"[0:v]scale=-2:'min(ih,{resolution})'[main_v];"
+        
+        if wm_mode == "animated":
+            # --- ANIMATED MODE LOGIC (from original code) ---
+            POSITIONS = 10
+            INTERVAL = 10
 
-        positions = [
-            (
-                random.randint(0, 200),
-                random.randint(0, 200)
+            positions = [
+                (
+                    random.randint(0, 200),
+                    random.randint(0, 200)
+                )
+                for _ in range(POSITIONS)
+            ]
+
+            index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
+            x_expr = ""
+            for i in range(POSITIONS): x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
+            x_expr += "0" + ")" * POSITIONS
+
+            y_expr = ""
+            for i in range(POSITIONS): y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
+            y_expr += "0" + ")" * POSITIONS
+
+            # CRITICAL FIX: Use TERNARY OPERATOR and ESCAPE THE COLON (:)
+            fade_expr = "(mod(t\\,10)/1 < (10-mod(t\\,10))/1) ? (mod(t\\,10)/1) \\: ((10-mod(t\\,10))/1)"
+
+            overlay_filter = (
+                f"[main_v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
+                f"alpha='{fade_expr}'"
+                f"[v]"
             )
-            for _ in range(POSITIONS)
-        ]
+        
+        elif wm_mode == "static":
+            # --- STATIC MODE LOGIC (Bottom Right) ---
+            
+            # Position: W-w-20 : H-h-20 (Bottom Right with 20px padding)
+            # Alpha: 1 (always visible)
+            overlay_filter = (
+                f"[main_v][1:v]overlay=x='W-w-20':y='H-h-20':"
+                f"alpha=1" 
+                f"[v]"
+            )
 
-        index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
-
-        x_expr = ""
-        for i in range(POSITIONS):
-            x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
-        x_expr += "0" + ")" * POSITIONS
-
-        y_expr = ""
-        for i in range(POSITIONS):
-            y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
-        y_expr += "0" + ")" * POSITIONS
-
-        # CRITICAL AND FINAL FIX: Use a TERNARY OPERATOR to replace min(A, B)
-        # to bypass the comma-parsing issue in FFmpeg expressions.
-        # Ternary: (Condition) ? (Value_if_True) : (Value_if_False)
-        fade_expr = "(mod(t\\,10)/1 < (10-mod(t\\,10))/1) ? (mod(t\\,10)/1) : ((10-mod(t\\,10))/1)"
-
+        # Combine scale and overlay
+        filter_complex = scale_filter + overlay_filter
+        
         # ============================================
-        # SINGLE FILTER_COMPLEX: Includes scaling and overlay
-        # ============================================
-        overlay_filter = (
-            # 1. Scale the input video [0:v] to the target resolution [main_v]
-            f"[0:v]scale=-2:'min(ih,{resolution})'[main_v];" 
-            # 2. Overlay the watermark [1:v] onto the scaled video [main_v]
-            f"[main_v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
-            f"alpha='{fade_expr}'" # Apply the dynamically calculated alpha
-            f"[v]" # Output is labeled [v]
-        )
-
-        # ============================================
-        # FFmpeg command (No change here)
+        # FFmpeg command
         # ============================================
         cmd = [
             "ffmpeg", "-y",
             "-i", in_path,
             "-i", wm_path,
-            "-filter_complex", overlay_filter,
+            "-filter_complex", filter_complex,
             "-map", "[v]",
             "-map", "0:a?",
             "-c:v", "libx264",
@@ -171,7 +180,6 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         return False
 
 
-
 # ==================== THUMB & DURATION ====================
 def get_duration(path):
     try:
@@ -194,12 +202,12 @@ async def worker(uid):
     sess.is_processing = True
 
     while sess.queue:
-        in_path, text, _ = sess.queue.pop(0)
+        in_path, text, _, wm_mode = sess.queue.pop(0) # Unpack wm_mode
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
         status = await app.send_message(uid,"Processing video + watermark...")
 
-        # Pass crf and resolution to the processing function
-        success = process_video(in_path, text, out_path, sess.crf, sess.resolution)
+        # Pass wm_mode to the processing function
+        success = process_video(in_path, text, out_path, sess.crf, sess.resolution, wm_mode) 
         await status.delete()
 
         if not success or not os.path.exists(out_path):
@@ -207,7 +215,7 @@ async def worker(uid):
             if os.path.exists(in_path): os.remove(in_path)
             continue
 
-        caption=f"Watermark: {text}\nCRF: {sess.crf}\nResolution: {sess.resolution}p"
+        caption=f"Watermark: {text}\nMode: **{wm_mode.capitalize()}**\nCRF: {sess.crf}\nResolution: {sess.resolution}p"
         try:
             thumb = make_thumb(out_path)
             duration = get_duration(out_path)
@@ -229,13 +237,21 @@ app=Client("wm_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, work
 
 @app.on_message(filters.command("start"))
 async def start(_, m):
-    await m.reply("**Watermark Bot**\n• Animated watermark every 10s\n• Set CRF → /crf 21\n• Set Resolution → /res 480|720|1080\nStart with /w")
+    await m.reply("**Watermark Bot**\nSelect a mode to begin:\n• **Animated** (Moving/Fading) → /w\n• **Static** (Bottom Right) → /sw\n\nSettings:\n• Set CRF → /crf 21\n• Set Resolution → /res 480|720|1080")
 
 @app.on_message(filters.command("w"))
 async def w(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
-    await m.reply("Send watermark text:")
+    sess.wm_mode = "animated" # Set mode for the next steps
+    await m.reply("Mode: **Animated**\nSend watermark text:")
+
+@app.on_message(filters.command("sw")) # New Static Watermark Command
+async def sw(_, m):
+    sess = await get_session(m.from_user.id)
+    sess.reset()
+    sess.wm_mode = "static" # Set mode for the next steps
+    await m.reply("Mode: **Static (Bottom Right)**\nSend watermark text:")
 
 @app.on_message(filters.command("crf"))
 async def crf_cmd(_, m):
@@ -259,18 +275,18 @@ async def res_cmd(_, m):
     except:
         await m.reply("Usage: `/res 480|720|1080`")
 
-@app.on_message(filters.text & ~filters.command(["start","w","crf","res","cancel"]))
+@app.on_message(filters.text & ~filters.command(["start","w","sw","crf","res","cancel"]))
 async def text_msg(_, m):
     sess = await get_session(m.from_user.id)
     if sess.step != "waiting_text": return
     sess.watermark_text = m.text.strip()
     sess.step = "waiting_media"
-    await m.reply(f"Watermark set to: **{sess.watermark_text}**\nNow send the video 🎥")
+    await m.reply(f"Watermark set to: **{sess.watermark_text}**\nMode: **{sess.wm_mode.capitalize()}**\nNow send the video 🎥")
 
 @app.on_message(filters.video | filters.document)
 async def media_msg(c, m):
     sess = await get_session(m.from_user.id)
-    if sess.step != "waiting_media": return await m.reply("Use `/w` first to set the watermark text.")
+    if sess.step != "waiting_media": return await m.reply("Use `/w` or `/sw` first to set the watermark text.")
     prog = await m.reply("Downloading...")
     # Get media file size for better path management
     media_path = m.video.file_id if m.video else m.document.file_id
@@ -288,10 +304,11 @@ async def media_msg(c, m):
     await prog.delete()
     if not path or not os.path.exists(path): return await m.reply("Download failed ❌")
     
-    sess.queue.append((path, sess.watermark_text, "video"))
+    # Pass the current watermark mode to the queue
+    sess.queue.append((path, sess.watermark_text, "video", sess.wm_mode))
     # Start the worker task
     asyncio.create_task(worker(m.from_user.id))
-    await m.reply(f"Video Queued! Current settings:\n• **CRF**: {sess.crf}\n• **Resolution**: {sess.resolution}p\n• **Queue size**: {len(sess.queue)}")
+    await m.reply(f"Video Queued! Current settings:\n• **Mode**: {sess.wm_mode.capitalize()}\n• **CRF**: {sess.crf}\n• **Resolution**: {sess.resolution}p\n• **Queue size**: {len(sess.queue)}")
 
 @app.on_message(filters.command("cancel"))
 async def cancel(_, m):
