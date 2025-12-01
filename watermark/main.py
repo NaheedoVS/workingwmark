@@ -92,29 +92,32 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = float(json.loads(r.stdout)["format"]["duration"])
         duration = max(1, int(duration))
 
-        # Animated watermark: jumps every 10 seconds (no diagonal movement)
+        # Precompute random positions every 10s
         block = 10
         num_blocks = max(1, (duration // block) + 1)
-        filter_chain = ""
-        last_map = "[0:v]"
+        positions = [(random.randint(0, max(0, resolution - wm.width)),
+                      random.randint(0, max(0, resolution - wm.height)))
+                     for _ in range(num_blocks)]
 
-        for i in range(num_blocks):
-            x = random.randint(0, max(0, resolution - wm.width))
-            y = random.randint(0, max(0, resolution - wm.height))
+        # Build x/y expressions
+        x_expr = "if(between(t,0,{0}),{1},".format(block, positions[0][0])
+        y_expr = "if(between(t,0,{0}),{1},".format(block, positions[0][1])
+
+        for i in range(1, num_blocks):
             start = i * block
             end = min((i + 1) * block, duration)
-            next_map = f"[v{i}]" if i < num_blocks - 1 else ""
-            filter_chain += f"{last_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})'{next_map};"
-            last_map = next_map if next_map else last_map
+            x_expr += "if(between(t,{0},{1}),{2},".format(start, end, positions[i][0])
+            y_expr += "if(between(t,{0},{1}),{2},".format(start, end, positions[i][1])
+        x_expr += "{}" + ")" * num_blocks  # default fallback 0
+        y_expr += "{}" + ")" * num_blocks
 
-        filter_chain = filter_chain.rstrip(";")
-
+        # FFmpeg command
         cmd = [
             "ffmpeg", "-y",
             "-i", in_path,
             "-i", wm_path,
-            "-filter_complex", filter_chain,
-            "-map", last_map,
+            "-filter_complex", f"[0:v][1:v]overlay=x='{x_expr}':y='{y_expr}'[v]",
+            "-map", "[v]",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "fast",
@@ -137,6 +140,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
     except Exception as e:
         logger.error(f"Processing error: {e}")
         return False
+
 
 # ==================== THUMB & DURATION ====================
 def get_duration(path):
