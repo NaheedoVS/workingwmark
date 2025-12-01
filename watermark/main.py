@@ -92,31 +92,57 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = float(json.loads(r.stdout)["format"]["duration"])
         duration = max(1, int(duration))
 
-        # Precompute random positions every 10s
-        block = 10
-        num_blocks = max(1, (duration // block) + 1)
-        positions = [(random.randint(0, max(0, resolution - wm.width)),
-                      random.randint(0, max(0, resolution - wm.height)))
-                     for _ in range(num_blocks)]
+        # ================================
+        # NEW WATERMARK ANIMATION LOGIC
+        # ================================
+        POSITIONS = 10        # 10 random locations
+        INTERVAL = 10         # each position lasts 10 sec
 
-        # Build x/y expressions
-        x_expr = "if(between(t,0,{0}),{1},".format(block, positions[0][0])
-        y_expr = "if(between(t,0,{0}),{1},".format(block, positions[0][1])
+        # Random positions (generated once, loop forever)
+        positions = [
+            (
+                random.randint(0, max(0, resolution - wm.width)),
+                random.randint(0, max(0, resolution - wm.height))
+            )
+            for _ in range(POSITIONS)
+        ]
 
-        for i in range(1, num_blocks):
-            start = i * block
-            end = min((i + 1) * block, duration)
-            x_expr += "if(between(t,{0},{1}),{2},".format(start, end, positions[i][0])
-            y_expr += "if(between(t,{0},{1}),{2},".format(start, end, positions[i][1])
-        x_expr += "{}" + ")" * num_blocks  # default fallback 0
-        y_expr += "{}" + ")" * num_blocks
+        # index = which spot to use now (cycles 0..9 forever)
+        index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
 
-        # FFmpeg command
+        # Build x expression
+        x_expr = ""
+        for i in range(POSITIONS):
+            x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
+        x_expr += "0" + ")" * POSITIONS
+
+        # Build y expression
+        y_expr = ""
+        for i in range(POSITIONS):
+            y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
+        y_expr += "0" + ")" * POSITIONS
+
+        # Fade in/out (no movement)
+        # fade-in:   first 1 sec   → opacity = t_block/1
+        # fade-out:  last 1 sec    → opacity = (10-t_block)/1
+        fade_expr = "min(mod(t\\,10)/1, (10-mod(t\\,10))/1)"
+
+        overlay_filter = (
+            f"[0:v][1:v]overlay="
+            f"x='{x_expr}':"
+            f"y='{y_expr}':"
+            f"format=auto:"
+            f"alpha='{fade_expr}'[v]"
+        )
+
+        # ================================
+        # FFmpeg Command
+        # ================================
         cmd = [
             "ffmpeg", "-y",
             "-i", in_path,
             "-i", wm_path,
-            "-filter_complex", f"[0:v][1:v]overlay=x='{x_expr}':y='{y_expr}'[v]",
+            "-filter_complex", overlay_filter,
             "-map", "[v]",
             "-map", "0:a?",
             "-c:v", "libx264",
@@ -140,6 +166,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
     except Exception as e:
         logger.error(f"Processing error: {e}")
         return False
+        
 
 
 # ==================== THUMB & DURATION ====================
