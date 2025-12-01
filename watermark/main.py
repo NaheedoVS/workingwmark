@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – High Quality 1:1 Resolution Match
+# Async Watermark Bot – Supersampled Quality + Smooth Bouncing
 
 import os
 import time
@@ -77,143 +77,127 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (High Res 1:1 Match) ====================
+# ==================== HIGH QUALITY IMAGE GENERATION ====================
 def create_watermark(text: str, target_video_height: int) -> str:
-    # 1. DYNAMIC FONT SIZE
-    # Instead of a fixed number, we calculate size based on video height.
-    # This guarantees the text is sharp at 720p, 1080p, or 4k.
-    # Division by 18 gives a good visual size (approx 5.5% of screen height).
-    base_font_size = int(target_video_height // 18) 
+    # === SUPERSAMPLING FACTOR ===
+    # We draw everything 3x larger than needed, then shrink it down.
+    # This eliminates pixelation/blurriness.
+    scale_factor = 3
+    
+    # Base font size logic (approx 5% of video height) * scale_factor
+    base_font_size = int((target_video_height // 20) * scale_factor)
     
     try:
         font = ImageFont.truetype(FONT_PATH, base_font_size)
     except:
         font = ImageFont.load_default()
 
-    # 2. CREATE TEXT LAYER
+    # 1. Create Text Layer
     dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
     bbox = dummy_draw.textbbox((0, 0), text, font=font, stroke_width=0)
-    w_base = bbox[2] - bbox[0]
-    h_base = bbox[3] - bbox[1]
+    w_raw = bbox[2] - bbox[0]
+    h_raw = bbox[3] - bbox[1]
 
-    # Draw text on transparent layer
-    text_img = Image.new("RGBA", (w_base, h_base + 20), (0,0,0,0))
+    text_img = Image.new("RGBA", (w_raw, h_raw + (20 * scale_factor)), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
-    
-    # Draw White Text (No stroke = Cleanest quality)
+    # White Text, No Stroke (Clean)
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
     
-    # Crop to exact text content
+    # Crop to content
     text_bbox = text_img.getbbox()
     if text_bbox:
         text_img = text_img.crop(text_bbox)
 
-    # 3. APPLY DISTORTION (Width 2x, Height 1.5x)
-    current_w, current_h = text_img.size
-    new_w = int(current_w * 2.0)
-    new_h = int(current_h * 1.5)
+    # 2. Apply Aspect Ratio Distortion (Width 2x, Height 1.5x)
+    # We do this at the high resolution
+    cur_w, cur_h = text_img.size
+    distort_w = int(cur_w * 2.0)
+    distort_h = int(cur_h * 1.5)
     
-    # Use LANCZOS filter for the highest quality resize
-    text_img = text_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
 
-    # 4. BACKGROUND BOX (Tight)
-    # Scale padding relative to resolution too so it doesn't look huge/tiny
+    # 3. Create Background Box (High Res)
+    # TIGHT padding calculation
     padding_x = int(base_font_size * 0.4) 
     padding_y = int(base_font_size * 0.2)
     
-    final_w = new_w + (padding_x * 2)
-    final_h = new_h + (padding_y * 2)
+    box_w = distort_w + (padding_x * 2)
+    box_h = distort_h + (padding_y * 2)
 
-    final_img = Image.new("RGBA", (final_w, final_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(final_img)
+    bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(bg_img)
     
-    # Draw Rounded Background
+    # Draw Rounded Box
     draw.rounded_rectangle(
-        (0, 0, final_w, final_h), 
-        radius=final_h // 2, 
+        (0, 0, box_w, box_h), 
+        radius=box_h // 2, 
         fill=(0, 0, 0, 180) 
     )
     
-    # Paste Text
-    paste_x = (final_w - new_w) // 2
-    paste_y = (final_h - new_h) // 2
-    final_img.paste(text_img, (paste_x, paste_y), text_img)
+    # Paste Text Center
+    px = (box_w - distort_w) // 2
+    py = (box_h - distort_h) // 2
+    bg_img.paste(text_img, (px, py), text_img)
+
+    # 4. FINAL DOWNSCALE (The Magic Step)
+    # Resize back down to the target size using LANCZOS.
+    # This smooths out all jagged edges.
+    final_w = int(box_w / scale_factor)
+    final_h = int(box_h / scale_factor)
+    
+    final_img = bg_img.resize((final_w, final_h), Image.Resampling.LANCZOS)
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
-    final_img.save(wm_path)
+    final_img.save(wm_path, "PNG")
     return wm_path
 
 # ==================== VIDEO PROCESSING ====================
-async def get_video_meta(path):
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "json", path
-    ]
-    process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await process.communicate()
-    try:
-        meta = json.loads(stdout)
-        return meta["streams"][0]["width"], meta["streams"][0]["height"]
-    except:
-        return 0, 0
-
 async def process_video(in_path, text, out_path, crf, resolution, mode="static"):
     wm_path = None
     try:
-        # Pass the resolution to create_watermark so we generate EXACT pixels
+        # Generate High-Res watermark based on output resolution
         wm_path = create_watermark(text, resolution)
         
+        # Scale video
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
-            # ================= STATIC MODE (BOTTOM RIGHT) =================
-            # Dynamic margins based on resolution (approx 3.5% of height)
+            # ================= STATIC (Bottom Right) =================
             margin = int(resolution * 0.035)
-            # W-w-margin:H-h-margin
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         
         else:
-            # ================= ANIMATED MODE =================
-            wm_img = Image.open(wm_path)
-            wm_w, wm_h = wm_img.size
-            in_w, in_h = await get_video_meta(in_path)
+            # ================= ANIMATED (Smooth Bounce) =================
+            # We use modulus math to make it bounce off the walls seamlessly.
+            # No intervals, no flickering, just one continuous layer.
             
-            # Since we generate WM based on target resolution, we assume [bg] is target resolution.
-            # We just calculate bounds based on that.
-            scaled_w = int(in_w * (resolution / in_h))
-            scaled_h = resolution
-            max_x = max(0, scaled_w - wm_w - 5)
-            max_y = max(0, scaled_h - wm_h - 5)
+            # Speed of movement (Pixels per second)
+            speed_x = resolution // 15 # Move width in ~15 seconds
+            speed_y = resolution // 20 # Move height in ~20 seconds
 
-            interval = 5 
-            hops = 8     
-
-            for i in range(hops):
-                x = random.randint(5, max_x)
-                y = random.randint(5, max_y)
-                enable_expr = f"between(t,{i*interval},{(i+1)*interval})"
-                out_node = f"[v{i}]"
-                filter_complex += f"{last_stream}[1:v]overlay={x}:{y}:enable='{enable_expr}'{out_node};"
-                last_stream = out_node
+            # Formula: pos = abs(mod(t * speed, 2 * (max_space)) - max_space)
+            # This creates a triangle wave (bounce effect) 0 -> max -> 0
             
-            filter_complex = filter_complex.rstrip(";")
+            x_expr = f"abs(mod(t*{speed_x}, 2*(W-w)) - (W-w))"
+            y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
 
+            filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
+
+        # === FFmpeg Command ===
         cmd_args = [
-            "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
+            "ffmpeg", "-y", 
+            "-i", in_path, 
+            "-i", wm_path,
             "-filter_complex", filter_complex,
-            "-map", "0:a?", "-c:v", "libx264", "-preset", "faster",
-            "-crf", str(crf), "-c:a", "aac", "-b:a", "192k", 
-            "-movflags", "+faststart", out_path
+            "-map", "0:a?", # Map audio if exists
+            "-c:v", "libx264", 
+            "-preset", "faster", # Balance between speed and quality
+            "-crf", str(crf), 
+            "-c:a", "aac", "-b:a", "192k", 
+            "-movflags", "+faststart", 
+            out_path
         ]
-
-        if mode == "animated":
-            cmd_args.insert(7, "-map")
-            cmd_args.insert(8, last_stream)
 
         process = await asyncio.create_subprocess_exec(
             *cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -287,9 +271,9 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot (High Quality)**\n\n"
+        "**👋 Watermark Bot (High Quality + Smooth Bounce)**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
-        "2. **/w** - Animated Watermark (Pop-up)\n"
+        "2. **/w** - Animated Watermark (Smooth Moving)\n"
         "3. **/settings** - Check config\n"
     )
 
@@ -298,14 +282,14 @@ async def set_animated(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "animated"
-    await m.reply("✨ **Animated Mode Selected**\nSend the watermark text:")
+    await m.reply("✨ **Animated Mode Selected**\n(Smooth Floating)\n\nSend the watermark text:")
 
 @app.on_message(filters.command("ws"))
 async def set_static(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "static"
-    await m.reply("📍 **Static Mode Selected**\n(Bottom Right Rounded Box)\n\nSend the watermark text:")
+    await m.reply("📍 **Static Mode Selected**\n(Bottom Right)\n\nSend the watermark text:")
 
 @app.on_message(filters.command("settings"))
 async def settings_handler(_, m):
