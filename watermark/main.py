@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Animated & Static Modes
+# Async Watermark Bot – Standard Library Only
 
 import os
 import time
@@ -7,7 +7,7 @@ import json
 import asyncio
 import logging
 import random
-import aiohttp
+import urllib.request  # <--- Changed from aiohttp to standard library
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from PIL import Image, ImageDraw, ImageFont
@@ -30,14 +30,15 @@ logger = logging.getLogger(__name__)
 FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
 FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
-async def check_resources():
+def check_resources():
+    """Downloads font using standard library (no pip install needed)."""
     if not os.path.exists(FONT_PATH):
         logger.info("Downloading font...")
-        async with aiohttp.ClientSession() as ses:
-            async with ses.get(FONT_URL) as res:
-                if res.status == 200:
-                    with open(FONT_PATH, "wb") as f:
-                        f.write(await res.read())
+        try:
+            urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+            logger.info("Font downloaded successfully.")
+        except Exception as e:
+            logger.error(f"Could not download font: {e}")
 
 # ==================== SESSION MANAGER ====================
 @dataclass
@@ -45,7 +46,7 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
-    watermark_mode: str = "animated"  # 'animated' or 'static'
+    watermark_mode: str = "animated"
     queue: List[Tuple[str, str, str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 23
@@ -78,6 +79,7 @@ async def progress_bar(current, total, status_msg, start_time):
 
 # ==================== IMAGE PROCESSING ====================
 def create_watermark(text: str, scale=0.6) -> str:
+    # Try to load the downloaded font, fall back to default if failed
     try:
         font = ImageFont.truetype(FONT_PATH, 40)
     except:
@@ -123,22 +125,18 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
     try:
         wm_path = create_watermark(text)
         
-        # Start Filter Chain: Scale Video
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
-            # ================= STATIC MODE =================
-            # overlay=15:H-h-15 puts it at bottom left with 15px padding
+            # Static: Bottom Left with 15px padding
             filter_complex += f"{last_stream}[1:v]overlay=15:H-h-15"
-        
         else:
-            # ================= ANIMATED MODE ===============
+            # Animated: Random pop-up
             wm_img = Image.open(wm_path)
             wm_w, wm_h = wm_img.size
             in_w, in_h = await get_video_meta(in_path)
             
-            # Approximate scaled dimensions
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
             max_x = max(0, scaled_w - wm_w - 20)
@@ -157,38 +155,24 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
             
             filter_complex = filter_complex.rstrip(";")
 
-        # Exec FFmpeg
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", in_path,
-            "-i", wm_path,
+        # Construct Command
+        cmd_args = [
+            "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_complex,
-            "-map", last_stream if mode == "animated" else "[out]", # Map logic varies slightly by filter
-            "-map", "0:a?",    
-            "-c:v", "libx264",
-            "-preset", "superfast", 
-            "-crf", str(crf),
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            out_path
         ]
+
+        if mode == "animated":
+            cmd_args.extend(["-map", last_stream])
+        # If static, we implicitly map the result of the single complex filter
         
-        # Fix map for static (simpler chain doesn't need named pads if we just let it flow)
-        if mode == "static":
-            cmd[6] = "-filter_complex" # ensure index
-            # For static, we don't need named output pads if it's the last filter
-            # But to be safe let's just remove the explicit map of [out] and let ffmpeg pick the result
-            cmd = [
-                "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
-                "-filter_complex", filter_complex,
-                "-map", "0:a?", "-c:v", "libx264", "-preset", "superfast",
-                "-crf", str(crf), "-c:a", "aac", "-b:a", "128k", 
-                "-movflags", "+faststart", out_path
-            ]
+        cmd_args.extend([
+            "-map", "0:a?", "-c:v", "libx264", "-preset", "superfast",
+            "-crf", str(crf), "-c:a", "aac", "-b:a", "128k", 
+            "-movflags", "+faststart", out_path
+        ])
 
         process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         await process.communicate()
 
@@ -329,7 +313,6 @@ async def media_handler(c, m):
         asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(check_resources())
+    check_resources() # Runs synchronously before bot start
     print("Bot Started...")
     app.run()
