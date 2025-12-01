@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Watermark Bot – Animated Watermark for full video
+# Watermark Bot – Animated & Static Support
+# library: pip install ffmpeg-python pyrogram tgcrypto pillow
 
-import os, time, json, asyncio, logging, random
+import os, time, json, asyncio, logging, subprocess, random
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from PIL import Image, ImageDraw, ImageFont
-import ffmpeg # pip install ffmpeg-python
+import ffmpeg # Wrapper library
 
 from pyrogram import Client, filters
 
@@ -54,7 +55,7 @@ async def download_progress(cur, tot, msg):
     try: await msg.edit_text(f"Downloading...\n[{bar}] {pct}%")
     except: pass
 
-# ==================== WATERMARK IMAGE GEN ====================
+# ==================== WATERMARK GEN ====================
 def create_watermark(text:str, scale=0.595):
     font = ImageFont.load_default()
     for p in ["fonts/Roboto-Bold.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
@@ -78,7 +79,7 @@ def create_watermark(text:str, scale=0.595):
     new_w,new_h = int(w*scale),int(h*scale)
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
-# ==================== ANIMATION EXPRESSIONS ====================
+# ==================== ANIMATION LOGIC ====================
 def get_animated_expr():
     POSITIONS = 10
     INTERVAL = 10
@@ -94,72 +95,103 @@ def get_animated_expr():
     for i in range(POSITIONS): y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
     y_expr += "0" + ")" * POSITIONS
     
-    # We can use simpler syntax here because ffmpeg-python handles the escaping
+    # Safe fading expression (Fade In 1s, Hold 8s, Fade Out 1s)
+    # Using 'if' logic instead of ternary colons to be safe with ffmpeg-python
     fade_expr = "if(lt(mod(t,10),1), mod(t,10), if(lt(mod(t,10),9), 1, 10-mod(t,10)))"
+    
     return x_expr, y_expr, fade_expr
 
-# ==================== PROCESSING (using ffmpeg-python) ====================
+# ==================== VIDEO PROCESSING ====================
 async def process_video(in_path, text, out_path, crf, resolution, wm_mode, status):
+    progress_pipe = f"/tmp/progress_{os.getpid()}.txt"
     try:
-        # 1. Make Watermark Image
+        # 1. Create Watermark
         wm = create_watermark(text)
         wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
 
-        # 2. Probe Duration
+        # 2. Get Duration
         probe = ffmpeg.probe(in_path)
         duration = float(probe['format']['duration'])
         total_duration = max(1, int(duration))
 
-        # 3. Build FFmpeg Graph
+        # 3. Build FFmpeg Graph (Using ffmpeg-python)
         input_stream = ffmpeg.input(in_path)
         wm_stream = ffmpeg.input(wm_path)
         
-        # Scale video first
+        # Scale video
         scaled = input_stream.video.filter('scale', -2, f'min(ih,{resolution})')
 
         if wm_mode == "animated":
             x_e, y_e, alpha_e = get_animated_expr()
-            # Apply overlay with expressions
+            # Library handles complex escaping automatically
             overlay_layer = scaled.overlay(wm_stream, x=x_e, y=y_e, alpha=alpha_e)
         else:
-            # Static: Bottom Right (W-w-20, H-h-20)
+            # Static: Bottom Right
             overlay_layer = scaled.overlay(wm_stream, x='W-w-20', y='H-h-20')
 
-        # 4. Output with Progress
-        # We use a socket or simply polling file size for progress with this lib, 
-        # OR we can just use the standard run() since capturing progress 
-        # from the wrapper library + async is tricky. 
-        # For reliability, we will run it and just show "Processing..." 
-        # or use a global tracker if absolutely needed.
-        # To keep it simple and working like the files you sent:
-        
-        process = (
-            ffmpeg
-            .output(overlay_layer, input_stream.audio, out_path, 
-                    vcodec='libx264', preset='fast', crf=crf, acodec='aac', audio_bitrate='192k', movflags='+faststart')
-            .overwrite_output()
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-        
-        # Poll for completion
-        while process.poll() is None:
-            await asyncio.sleep(2)
-            # Optional: You can check os.path.getsize(out_path) here to guess progress
-            # but accurate progress requires parsing stderr which is complex in async loop.
-            try: await status.edit_text(f"Processing ({wm_mode})...\nPlease wait.")
-            except: pass
+        # 4. Compile Command (Mix of Library + Subprocess for Progress Bar)
+        # We compile the graph to arguments, then run it manually to watch the pipe
+        out = ffmpeg.output(
+            overlay_layer, 
+            input_stream.audio, 
+            out_path, 
+            vcodec='libx264', 
+            preset='fast', 
+            crf=crf, 
+            acodec='aac', 
+            audio_bitrate='192k', 
+            movflags='+faststart'
+        ).overwrite_output()
 
-        # Clean up watermark
-        if os.path.exists(wm_path): os.remove(wm_path)
+        cmd = ffmpeg.compile(out)
         
-        return os.path.exists(out_path) and os.path.getsize(out_path) > 10000
+        # Add progress flag manually
+        if not os.path.exists(progress_pipe): os.mkfifo(progress_pipe)
+        cmd.extend(["-progress", progress_pipe])
+
+        # 5. Run Process
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Progress Loop
+        last_pct = -1
+        with open(progress_pipe, 'r') as pipe:
+            while process.poll() is None:
+                line = pipe.readline()
+                if not line:
+                    await asyncio.sleep(0.1)
+                    continue
+                
+                if "out_time_ms" in line:
+                    try:
+                        ms = int(line.split('=')[1])
+                        pct = min(100, int((ms / 1_000_000) * 100 / total_duration))
+                        if pct > last_pct and (pct % 5 == 0 or pct == 100):
+                            last_pct = pct
+                            bar = "█"*(pct//5) + "░"*(20-pct//5)
+                            await status.edit_text(f"Processing ({wm_mode})...\n[{bar}] {pct}%")
+                    except: pass
+        
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            # Report actual error to Telegram
+            err_msg = stderr.decode()[-800:] # Last 800 chars
+            await status.edit_text(f"❌ FFmpeg Error:\n`{err_msg}`")
+            return False
+
+        # Cleanup
+        if os.path.exists(wm_path): os.remove(wm_path)
+        if os.path.exists(progress_pipe): os.remove(progress_pipe)
+
+        return os.path.exists(out_path)
 
     except ffmpeg.Error as e:
-        logger.error(f"FFmpeg Error: {e.stderr.decode() if e.stderr else str(e)}")
+        await status.edit_text(f"❌ FFmpeg Graph Error:\n`{e.stderr.decode()}`")
         return False
     except Exception as e:
-        logger.error(f"General Error: {e}")
+        logger.error(f"Error: {e}")
+        await status.edit_text(f"❌ Error: {str(e)}")
         return False
 
 # ==================== HELPERS ====================
@@ -187,25 +219,22 @@ async def worker(uid):
         in_path, text, _, wm_mode = sess.queue.pop(0)
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
         
-        status = await app.send_message(uid,f"Starting video processing ({wm_mode})...")
+        status = await app.send_message(uid,f"Starting ({wm_mode})...")
         
         success = await process_video(in_path, text, out_path, sess.crf, sess.resolution, wm_mode, status)
-        await status.delete()
-
+        
         if success:
-            caption=f"Watermark: {text}\nMode: {wm_mode}\nCRF: {sess.crf}"
+            await status.delete()
+            caption=f"Watermark: {text}\nMode: {wm_mode}\nCRF: {sess.crf}\nRes: {sess.resolution}p"
             thumb = make_thumb(out_path)
             try:
-                # Get duration using ffmpeg-python probe
                 d = float(ffmpeg.probe(out_path)['format']['duration'])
                 await app.send_video(uid, out_path, caption=caption, duration=int(d), thumb=thumb)
                 await app.send_message(uid,"Done ✔️")
             except Exception as e:
                 await app.send_message(uid,f"Upload error: {e}")
             if thumb: os.remove(thumb)
-        else:
-            await app.send_message(uid,"Processing failed ❌")
-
+        
         for p in (in_path, out_path):
             if os.path.exists(p): os.remove(p)
 
@@ -223,14 +252,14 @@ async def w(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.wm_mode = "animated"
-    await m.reply("Mode: **Animated**\nSend watermark text:")
+    await m.reply("Mode: **Animated**\nSend text:")
 
 @app.on_message(filters.command("sw"))
 async def sw(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.wm_mode = "static"
-    await m.reply("Mode: **Static**\nSend watermark text:")
+    await m.reply("Mode: **Static**\nSend text:")
 
 @app.on_message(filters.command("crf"))
 async def crf_cmd(_, m):
@@ -265,7 +294,7 @@ async def media_msg(c, m):
     
     sess.queue.append((path, sess.watermark_text, "video", sess.wm_mode))
     asyncio.create_task(worker(m.from_user.id))
-    await m.reply("Queued.")
+    await m.reply(f"Queued ({sess.wm_mode})")
 
 @app.on_message(filters.command("cancel"))
 async def cancel(_, m):
