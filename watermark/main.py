@@ -84,44 +84,45 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         wm.save(wm_path)
 
         # Get video duration
-        r = subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration",
-                            "-of","json",in_path], capture_output=True, text=True)
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "json", in_path],
+            capture_output=True, text=True
+        )
         duration = float(json.loads(r.stdout)["format"]["duration"])
         duration = max(1, int(duration))
 
-        # Prepare filter_complex for animated watermark
+        # Animated watermark: move every 10s with fade in/out
         block = 10
-        num_blocks = (duration // block) + 1
+        num_blocks = max(1, (duration // block) + 1)
         overlays = []
+        last_map = "[0:v]"
 
         for i in range(num_blocks):
             x = random.randint(0, max(0, resolution - wm.width))
             y = random.randint(0, max(0, resolution - wm.height))
-            start = i*block
-            end = min((i+1)*block, duration)
-
-            in_map = "[0:v]" if i==0 else f"[v{i-1}]"
-            out_map = f"[v{i}]"
+            start = i * block
+            end = min((i + 1) * block, duration)
             overlays.append(
-                f"{in_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})',format=yuv420p{out_map};"
+                f"{last_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})'[v{i}];"
             )
+            last_map = f"[v{i}]"
 
-        filter_chain = "".join(overlays)
-        last_map = f"[v{num_blocks-1}]" if num_blocks>0 else "[0:v]"
+        filter_chain = "".join(overlays).rstrip(";")
 
         cmd = [
-            "ffmpeg","-y",
-            "-i",in_path,
-            "-i",wm_path,
-            "-filter_complex", filter_chain.rstrip(";"),
+            "ffmpeg", "-y",
+            "-i", in_path,
+            "-i", wm_path,
+            "-filter_complex", filter_chain,
             "-map", last_map,
             "-map", "0:a?",
-            "-c:v","libx264",
-            "-preset","fast",
-            "-crf",str(crf),
-            "-c:a","aac",
-            "-b:a","192k",
-            "-movflags","+faststart",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", str(crf),
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
             out_path
         ]
 
@@ -132,7 +133,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
 
         os.remove(wm_path)
 
-        return result.returncode==0 and os.path.exists(out_path) and os.path.getsize(out_path)>200000
+        return result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 200000
 
     except Exception as e:
         logger.error(f"Processing error: {e}")
