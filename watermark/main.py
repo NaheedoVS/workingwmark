@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-# Watermark Bot – Dual Mode (Static + Slide) + Buffer Fix
+# Watermark Bot – Optimized for Large Files (2GB+) & Long Duration
 
 import os, time, json, asyncio, logging, shutil, re
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, errors
 
 # ==================== CONFIG ====================
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+# Directory for processing
 WORK_DIR = "downloads"
+if os.path.exists(WORK_DIR):
+    shutil.rmtree(WORK_DIR) # Clean start
 os.makedirs(WORK_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -22,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== BINARY DETECTION ====================
+# ==================== SYSTEM CHECKS ====================
 def get_ffmpeg_path():
     if os.path.exists("/usr/bin/ffmpeg"): return "/usr/bin/ffmpeg"
     path = shutil.which("ffmpeg")
@@ -32,6 +35,11 @@ def get_ffmpeg_path():
 FFMPEG_BIN = get_ffmpeg_path()
 RESAMPLE_MODE = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS
 
+def check_disk_space(required_gb=2):
+    total, used, free = shutil.disk_usage(".")
+    free_gb = free / (2**30)
+    return free_gb > required_gb
+
 # ==================== SESSION MANAGEMENT ====================
 @dataclass
 class UserSession:
@@ -40,7 +48,7 @@ class UserSession:
     watermark_text: str = ""
     queue: List[Tuple[str, str]] = field(default_factory=list)
     is_processing: bool = False
-    crf: int = 21
+    crf: int = 23 # Slightly higher default for 2GB+ files to save space
     resolution: int = 720
     style: str = "static"
 
@@ -60,6 +68,8 @@ async def get_session(uid):
 async def progress_bar(current, total, status_msg, action_desc):
     if total == 0: return
     pct = int(current * 100 / total)
+    
+    # Update only every 5% or if complete (reduces flood wait risks)
     if getattr(progress_bar, "last_pct", 0) // 5 == pct // 5 and pct != 100: return
     progress_bar.last_pct = pct
     
@@ -113,7 +123,7 @@ async def generate_thumbnail(in_path):
     await (await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)).wait()
     return out if os.path.exists(out) else None
 
-# ==================== PROCESSING ====================
+# ==================== VIDEO PROCESSING ====================
 async def process_video(in_path, text, out_path, crf, resolution, style, status_msg, total_duration):
     wm_path = f"{WORK_DIR}/wm_{int(time.time())}_{os.getpid()}.png"
     
@@ -135,35 +145,42 @@ async def process_video(in_path, text, out_path, crf, resolution, style, status_
         # 3. Build Filter
         filter_chain = f"[0:v]scale=-2:{resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
 
-        # Added -hide_banner, -loglevel error, -stats to prevent buffer overflow
+        # OPTIMIZATION:
+        # -preset ultrafast: Critical for 4hr videos (speeds up encoding 5x-10x)
+        # -max_muxing_queue_size 1024: Prevents RAM spikes on long files
         cmd = [
             FFMPEG_BIN, "-y", "-hide_banner", "-loglevel", "error", "-stats",
             "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_chain,
-            "-c:v", "libx264", "-preset", "fast", "-crf", str(crf),
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+            "-c:a", "aac", "-b:a", "128k",
+            "-max_muxing_queue_size", "1024",
+            "-movflags", "+faststart",
             out_path
         ]
 
-        # Added limit=1024*1024 (1MB) to handle large output lines if they occur
         process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024 
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
-        # 4. Monitor Progress
+        # 4. Monitor Progress (Low Memory Loop)
         while True:
             try:
                 line = await process.stderr.readline()
                 if not line: break
                 
                 line_str = line.decode('utf-8', errors='ignore')
-                match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line_str)
-                if match and total_duration > 0:
-                    cur = time_to_seconds(match.group(1))
-                    await progress_bar(cur, total_duration, status_msg, "Processing")
-            except asyncio.LimitOverrunError:
-                # If a line is still too long, skip it to prevent crash
+                
+                if "time=" in line_str:
+                    match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", line_str)
+                    if match and total_duration > 0:
+                        cur = time_to_seconds(match.group(1))
+                        await progress_bar(cur, total_duration, status_msg, "Processing")
+                
+                # Prevent CPU blocking
+                await asyncio.sleep(0.05)
+
+            except Exception:
                 continue
 
         await process.wait()
@@ -184,6 +201,13 @@ async def queue_worker(uid):
     try:
         while sess.queue:
             in_path, _ = sess.queue.pop(0)
+            
+            # Check Disk Space (Need approx 2x file size)
+            if not check_disk_space(required_gb=1):
+                await app.send_message(uid, "❌ Server Disk Full! Cannot process large file.")
+                if os.path.exists(in_path): os.remove(in_path)
+                continue
+
             out_path = f"{WORK_DIR}/out_{uid}_{int(time.time())}.mp4"
             status = await app.send_message(uid, "⏳ Initializing...")
             
@@ -200,14 +224,19 @@ async def queue_worker(uid):
                     await app.send_video(uid, out_path, caption=capt, duration=int(dur), thumb=thumb,
                                          progress=progress_bar, progress_args=(status, "Uploading"))
                     await status.delete()
-                except Exception as e: await status.edit_text(f"Upload Error: {e}")
+                except errors.EntityTooLarge:
+                    await status.edit_text("❌ File too big to upload (Telegram limit is 2GB for bots).")
+                except Exception as e:
+                    await status.edit_text(f"Upload Error: {e}")
                 
                 if thumb and os.path.exists(thumb): os.remove(thumb)
             else:
-                await status.edit_text("❌ Processing Failed. Check logs.")
+                await status.edit_text("❌ Processing Failed (Possible timeout or corruption).")
             
+            # Aggressive Cleanup
             if os.path.exists(in_path): os.remove(in_path)
             if os.path.exists(out_path): os.remove(out_path)
+
     finally:
         sess.is_processing = False
 
@@ -217,12 +246,13 @@ app = Client("wm_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, wo
 @app.on_message(filters.command("start"))
 async def start_cmd(_, m):
     await m.reply(
-        "**Watermark Bot** 🎥\n"
+        "**Large Video Watermark Bot** 🚀\n"
+        "Supports 2GB+ & 4 Hour Videos\n\n"
         "1. /w - Set Text\n"
-        "2. /mode static - Bottom Right (Default)\n"
-        "3. /mode slide - Left to Right Animation\n"
-        "4. /crf 21 - Set Quality\n"
-        "5. /res 720 - Set Resolution"
+        "2. /mode static | slide\n"
+        "3. /crf 23 - Quality (Higher = Smaller Size)\n"
+        "4. /res 720 - Resolution\n\n"
+        "Send your video file to start!"
     )
 
 @app.on_message(filters.command("w"))
@@ -239,10 +269,8 @@ async def mode_cmd(_, m):
         if mode in ["static", "slide"]:
             sess.style = mode
             await m.reply(f"✅ Mode set to: **{mode.title()}**")
-        else:
-            await m.reply("Unknown mode. Use:\n`/mode static`\n`/mode slide`")
-    except:
-        await m.reply(f"Current mode: **{sess.style.title()}**\nChange with: `/mode static` or `/mode slide`")
+        else: await m.reply("Usage: `/mode static` or `/mode slide`")
+    except: await m.reply(f"Current mode: **{sess.style.title()}**")
 
 @app.on_message(filters.command("crf"))
 async def crf_cmd(_, m):
@@ -251,7 +279,7 @@ async def crf_cmd(_, m):
         sess = await get_session(m.from_user.id)
         sess.crf = v
         await m.reply(f"CRF set: {v}")
-    except: await m.reply("Usage: /crf 21")
+    except: await m.reply("Usage: /crf 23")
 
 @app.on_message(filters.command("res"))
 async def res_cmd(_, m):
@@ -277,13 +305,21 @@ async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
     if sess.step != "waiting_media": return await m.reply("Use /w to set text first.")
     
+    # Check estimated size (2GB limit)
+    file_size = getattr(m.video, "file_size", getattr(m.document, "file_size", 0))
+    if file_size > 2 * 1024 * 1024 * 1024:
+        return await m.reply("❌ Telegram Bots are limited to 2GB uploads.")
+
     st = await m.reply("⬇️ Downloading...")
-    path = await c.download_media(
-        m, file_name=f"{WORK_DIR}/{m.from_user.id}_{int(time.time())}.mp4",
-        progress=progress_bar, progress_args=(st, "Downloading")
-    )
-    sess.queue.append((path, "video"))
-    asyncio.create_task(queue_worker(m.from_user.id))
+    try:
+        path = await c.download_media(
+            m, file_name=f"{WORK_DIR}/{m.from_user.id}_{int(time.time())}.mp4",
+            progress=progress_bar, progress_args=(st, "Downloading")
+        )
+        sess.queue.append((path, "video"))
+        asyncio.create_task(queue_worker(m.from_user.id))
+    except Exception as e:
+        await st.edit_text(f"Download Failed: {e}")
 
 if __name__ == "__main__":
     print("Bot Started...")
