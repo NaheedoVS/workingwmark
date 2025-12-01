@@ -10,7 +10,7 @@ from pyrogram import Client, filters
 
 # ==================== CONFIG ====================
 API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
+API_HASH = os.environ.get("API_HASH"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 os.makedirs("/tmp", exist_ok=True)
@@ -30,6 +30,7 @@ class UserSession:
     is_processing: bool = False
     crf: int = 21
     resolution: int = 720
+
     def reset(self):
         self.step = "waiting_text"
         self.watermark_text = ""
@@ -65,7 +66,7 @@ def create_watermark(text:str, scale=0.595):
     dummy = Image.new("RGBA",(1,1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0,0),text,font=font)
-    px,py = 20,11   # vertical size increased by ~10%
+    px,py = 20,12   # background increased a little
     w,h = bbox[2]-bbox[0]+px, bbox[3]-bbox[1]+py
     img = Image.new("RGBA",(w,h),(0,0,0,0))
     draw = ImageDraw.Draw(img)
@@ -93,51 +94,45 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = max(1, int(duration))
 
         # ================================
-        # NEW WATERMARK ANIMATION LOGIC
+        # RANDOM POSITIONS + 10 SEC BLOCKS
         # ================================
-        POSITIONS = 10        # 10 random locations
-        INTERVAL = 10         # each position lasts 10 sec
+        POSITIONS = 10
+        INTERVAL = 10
 
-        # Random positions (generated once, loop forever)
         positions = [
             (
-                random.randint(0, max(0, resolution - wm.width)),
-                random.randint(0, max(0, resolution - wm.height))
+                random.randint(0, 200),
+                random.randint(0, 200)
             )
             for _ in range(POSITIONS)
         ]
 
-        # index = which spot to use now (cycles 0..9 forever)
         index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
 
-        # Build x expression
         x_expr = ""
         for i in range(POSITIONS):
             x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
         x_expr += "0" + ")" * POSITIONS
 
-        # Build y expression
         y_expr = ""
         for i in range(POSITIONS):
             y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
         y_expr += "0" + ")" * POSITIONS
 
-        # Fade in/out (no movement)
-        # fade-in:   first 1 sec   → opacity = t_block/1
-        # fade-out:  last 1 sec    → opacity = (10-t_block)/1
+        # fade in/out inside each 10-second block
         fade_expr = "min(mod(t\\,10)/1, (10-mod(t\\,10))/1)"
 
+        # ============================================
+        # FIXED OVERLAY (NO alpha=, uses colorchannelmixer)
+        # ============================================
         overlay_filter = (
-            f"[0:v][1:v]overlay="
-            f"x='{x_expr}':"
-            f"y='{y_expr}':"
-            f"format=auto:"
-            f"alpha='{fade_expr}'[v]"
+            f"[1:v]format=rgba,colorchannelmixer=aa='{fade_expr}'[wm];"
+            f"[0:v][wm]overlay=x='{x_expr}':y='{y_expr}':format=auto[v]"
         )
 
-        # ================================
-        # FFmpeg Command
-        # ================================
+        # ============================================
+        # FFmpeg command
+        # ============================================
         cmd = [
             "ffmpeg", "-y",
             "-i", in_path,
@@ -166,7 +161,6 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
     except Exception as e:
         logger.error(f"Processing error: {e}")
         return False
-        
 
 
 # ==================== THUMB & DURATION ====================
@@ -187,7 +181,7 @@ def make_thumb(path):
 async def worker(uid):
     sess = await get_session(uid)
     if sess.is_processing: return
-    sess.is_processing=True
+    sess.is_processing = True
 
     while sess.queue:
         in_path, text, _ = sess.queue.pop(0)
@@ -288,3 +282,4 @@ if __name__=="__main__":
         import traceback
         print("Bot crashed:", e)
         traceback.print_exc()
+        
