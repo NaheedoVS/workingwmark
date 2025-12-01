@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Bottom Right + Larger + Thicker
+# Async Watermark Bot – Stretched Text + Tight Box + Bottom Right
 
 import os
 import time
@@ -77,56 +77,71 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING ====================
+# ==================== IMAGE PROCESSING (Stretched & Tight) ====================
 def create_watermark(text: str) -> str:
-    # 1. TEXT SIZE INCREASED (Was 60 -> Now 75)
-    font_size = 75
+    # 1. BASE SETTINGS
+    # We start with a base size, then stretch it.
+    base_font_size = 40 
     try:
-        font = ImageFont.truetype(FONT_PATH, font_size)
+        font = ImageFont.truetype(FONT_PATH, base_font_size)
     except:
         font = ImageFont.load_default()
 
-    dummy = Image.new("RGBA", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    
-    # 2. THICKNESS INCREASED (Stroke width 3)
-    stroke = 3
-    
-    # Get exact text size
-    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    
-    # 3. Padding (Scaled up for larger text)
-    padding_x = 32  
-    padding_y = 18  
-    
-    box_width = text_width + (padding_x * 2)
-    box_height = text_height + (padding_y * 2)
+    # 2. CREATE TEXT ONLY LAYER
+    # Determine base size
+    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
+    bbox = dummy_draw.textbbox((0, 0), text, font=font, stroke_width=0)
+    w_base = bbox[2] - bbox[0]
+    h_base = bbox[3] - bbox[1]
 
-    img = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    # Draw text on a transparent image first
+    # Add small buffer to prevent clipping
+    text_img = Image.new("RGBA", (w_base, h_base + 10), (0,0,0,0))
+    d_text = ImageDraw.Draw(text_img)
     
-    # 4. Draw Rounded Background
+    # Draw White Text (Reduced Thickness: stroke_width=0)
+    d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
+    
+    # Trim the text image to exact content to handle resizing accurately
+    text_bbox = text_img.getbbox()
+    if text_bbox:
+        text_img = text_img.crop(text_bbox)
+
+    # 3. APPLY DISTORTION (Width 2x, Height 1.5x)
+    current_w, current_h = text_img.size
+    new_w = int(current_w * 2.0) # Width 2x
+    new_h = int(current_h * 1.5) # Height 1.5x
+    
+    # Resample with LANCZOS for high quality scaling
+    text_img = text_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # 4. BACKGROUND BOX (Reduced Size / Tight)
+    # Reduced padding to 16px horizontal, 8px vertical
+    padding_x = 16 
+    padding_y = 8  
+    
+    final_w = new_w + (padding_x * 2)
+    final_h = new_h + (padding_y * 2)
+
+    final_img = Image.new("RGBA", (final_w, final_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(final_img)
+    
+    # Draw Rounded Background
     draw.rounded_rectangle(
-        (0, 0, box_width, box_height), 
-        radius=box_height // 2, 
+        (0, 0, final_w, final_h), 
+        radius=final_h // 2, 
         fill=(0, 0, 0, 180) 
     )
     
-    # 5. Draw Text
-    draw.text(
-        (box_width / 2, box_height / 2 - 4), # -4 for visual centering correction
-        text, 
-        font=font, 
-        fill=(255, 255, 255, 255),
-        anchor="mm",
-        stroke_width=stroke,
-        stroke_fill=(255, 255, 255, 255)
-    )
+    # Paste the distorted text onto the center of the background
+    paste_x = (final_w - new_w) // 2
+    paste_y = (final_h - new_h) // 2
+    
+    # Paste using the text image itself as the mask (3rd argument) to keep transparency
+    final_img.paste(text_img, (paste_x, paste_y), text_img)
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
-    img.save(wm_path)
+    final_img.save(wm_path)
     return wm_path
 
 # ==================== VIDEO PROCESSING ====================
@@ -157,6 +172,7 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="static")
 
         if mode == "static":
             # ================= STATIC MODE (BOTTOM RIGHT) =================
+            # W-w-25:H-h-70 (Standard Instagram-safe bottom right)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-25:H-h-70"
         
         else:
