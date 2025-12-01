@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – "Social Media Tag" Style + Progress Bar
+# Async Watermark Bot – Fixed Font Loading + Massive Text
 
 import os
 import re
@@ -27,19 +27,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== RESOURCES ====================
-FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Medium.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Roboto-Medium.ttf")
+# ==================== RESOURCES (FIXED) ====================
+FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
 def check_resources():
-    """Downloads font using standard library."""
+    """Downloads font with a fake User-Agent to prevent 403 Forbidden errors."""
     if not os.path.exists(FONT_PATH):
-        logger.info("Downloading font...")
+        logger.info("Downloading bold font...")
         try:
+            # Create a request with a header so we look like a browser
+            opener = urllib.request.build_opener()
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
+            urllib.request.install_opener(opener)
+            
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
             logger.info("Font downloaded successfully.")
         except Exception as e:
             logger.error(f"Could not download font: {e}")
+
+def get_font(size):
+    """Tries to load downloaded font, then system font, then default."""
+    # 1. Try Downloaded Font
+    try:
+        return ImageFont.truetype(FONT_PATH, size)
+    except:
+        pass
+    
+    # 2. Try Common Linux System Fonts (Backup)
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+    except:
+        pass
+    
+    # 3. Last Resort (The tiny one you hate) - Log a warning
+    logger.warning("⚠️ ALL FONTS FAILED. USING TINY DEFAULT FONT.")
+    return ImageFont.load_default()
 
 # ==================== SESSION MANAGER ====================
 @dataclass
@@ -89,20 +112,17 @@ async def download_progress(current, total, status_msg, start_time):
     except:
         pass
 
-# ==================== SOCIAL TAG WATERMARK GENERATION ====================
+# ==================== MASSIVE WATERMARK GENERATION ====================
 def create_watermark(text: str, target_video_height: int) -> str:
-    # Supersampling Factor (High Quality)
+    # Supersampling for crisp edges
     scale_factor = 3
     
-    # === SIZE LOGIC: STANDARD SOCIAL MEDIA TAG ===
-    # The tag in the image is about 4.5% of the screen height.
-    # Calculation: Height / 22
-    base_font_size = int((target_video_height // 22) * scale_factor)
+    # === SIZE CALCULATION ===
+    # height // 3.5 means text is roughly 30% of the screen height.
+    base_font_size = int((target_video_height // 3.5) * scale_factor)
     
-    try:
-        font = ImageFont.truetype(FONT_PATH, base_font_size)
-    except:
-        font = ImageFont.load_default()
+    # Load Font using the robust loader
+    font = get_font(base_font_size)
 
     # 1. Text Layer
     dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
@@ -110,35 +130,34 @@ def create_watermark(text: str, target_video_height: int) -> str:
     w_raw = bbox[2] - bbox[0]
     h_raw = bbox[3] - bbox[1]
 
-    text_img = Image.new("RGBA", (w_raw, h_raw + (20 * scale_factor)), (0,0,0,0))
+    text_img = Image.new("RGBA", (w_raw, h_raw + (40 * scale_factor)), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
-    # White Text
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
     
     if text_img.getbbox():
         text_img = text_img.crop(text_img.getbbox())
 
-    # 2. No Distortion (Natural Font Look like Screenshot)
+    # 2. Distortion (Width 2.5x)
     cur_w, cur_h = text_img.size
-    # We keep aspect ratio normal (1.0) to match the clean look of the screenshot
-    text_img = text_img.resize((cur_w, cur_h), Image.Resampling.LANCZOS)
-
-    # 3. Background Box (Pill Shape)
-    # Balanced padding for the "Tag" look
-    padding_x = int(base_font_size * 0.6) 
-    padding_y = int(base_font_size * 0.35)
+    distort_w = int(cur_w * 2.5) 
+    distort_h = int(cur_h * 1.5)
     
-    box_w = cur_w + (padding_x * 2)
-    box_h = cur_h + (padding_y * 2)
+    text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
+
+    # 3. Background Box (Tight Fit)
+    # Reduced padding relative to font size for a tight fit
+    padding_x = int(base_font_size * 0.15) 
+    padding_y = int(base_font_size * 0.05)
+    
+    box_w = distort_w + (padding_x * 2)
+    box_h = distort_h + (padding_y * 2)
 
     bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(bg_img)
+    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 4, fill=(0, 0, 0, 180))
     
-    # Semi-transparent black (180/255)
-    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 2, fill=(0, 0, 0, 180))
-    
-    px = (box_w - cur_w) // 2
-    py = (box_h - cur_h) // 2
+    px = (box_w - distort_w) // 2
+    py = (box_h - distort_h) // 2
     bg_img.paste(text_img, (px, py), text_img)
 
     # 4. Final Downscale
@@ -185,9 +204,8 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
         last_stream = "[bg]"
 
         if mode == "static":
-            # Position: Bottom Right (W-w-margin)
-            # Margin is small/standard (30px on 1080p, 20px on 720p)
-            margin = int(resolution * 0.03) 
+            # Margin = 2% of resolution
+            margin = int(resolution * 0.02)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         else:
             speed_x = resolution // 15
@@ -312,7 +330,7 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot v3.4**\n\n"
+        "**👋 Watermark Bot v3.5 (Fixed)**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
         "2. **/w** - Animated Watermark (Smooth Bounce)\n"
         "3. **/settings** - Check config\n"
