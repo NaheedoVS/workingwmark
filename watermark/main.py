@@ -78,6 +78,7 @@ def create_watermark(text:str, scale=0.595):
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
 # ==================== VIDEO PROCESSING (FIX APPLIED HERE) ====================
+# ==================== VIDEO PROCESSING (FINAL FIX APPLIED) ====================
 def process_video(in_path, text, out_path, crf=21, resolution=720):
     try:
         # Create watermark PNG
@@ -120,26 +121,25 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
         y_expr += "0" + ")" * POSITIONS
 
-        # CRITICAL FIX: Enhanced escaping for the MIN function's comma (outer comma).
-        # We use a quadruple backslash (\\\\,) in the Python string to ensure 
-        # the comma is correctly interpreted by the FFmpeg expression evaluator.
-        fade_expr = "min(mod(t\\,10)/1\\\\, (10-mod(t\\,10))/1)"
+        # CRITICAL AND FINAL FIX: Use a TERNARY OPERATOR to replace min(A, B)
+        # to bypass the comma-parsing issue in FFmpeg expressions.
+        # Ternary: (Condition) ? (Value_if_True) : (Value_if_False)
+        fade_expr = "(mod(t\\,10)/1 < (10-mod(t\\,10))/1) ? (mod(t\\,10)/1) : ((10-mod(t\\,10))/1)"
 
         # ============================================
         # SINGLE FILTER_COMPLEX: Includes scaling and overlay
-        # The '-vf scale' option is removed from the main command list.
         # ============================================
         overlay_filter = (
             # 1. Scale the input video [0:v] to the target resolution [main_v]
             f"[0:v]scale=-2:'min(ih,{resolution})'[main_v];" 
             # 2. Overlay the watermark [1:v] onto the scaled video [main_v]
             f"[main_v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
-            f"alpha='{fade_expr}'" # Apply the dynamically escaped fade expression
+            f"alpha='{fade_expr}'" # Apply the dynamically calculated alpha
             f"[v]" # Output is labeled [v]
         )
 
         # ============================================
-        # FFmpeg command
+        # FFmpeg command (No change here)
         # ============================================
         cmd = [
             "ffmpeg", "-y",
@@ -169,6 +169,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
     except Exception as e:
         logger.error(f"Processing error: {e}")
         return False
+
 
 
 # ==================== THUMB & DURATION ====================
