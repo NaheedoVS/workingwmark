@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Huge Text (3x) + Wider + Progress Bar
+# Async Watermark Bot – Massive Text (1/5th Height) + Ultra Wide + Progress Bar
 
 import os
 import re
@@ -94,13 +94,14 @@ def create_watermark(text: str, target_video_height: int) -> str:
     # Supersampling Factor (High Quality)
     scale_factor = 3
     
-    # === SIZE CHANGE: 3x BIGGER ===
-    # Was: // 20 (Small) -> Now: // 7 (Huge)
-    base_font_size = int((target_video_height // 7) * scale_factor)
+    # === SIZE CHANGE: MASSIVE ===
+    # Was: // 7 -> Now: // 5 (Takes up 20% of vertical screen space)
+    base_font_size = int((target_video_height // 5) * scale_factor)
     
     try:
         font = ImageFont.truetype(FONT_PATH, base_font_size)
     except:
+        # Fallback note: If you see tiny text, it means the font failed to download.
         font = ImageFont.load_default()
 
     # 1. Text Layer
@@ -116,18 +117,17 @@ def create_watermark(text: str, target_video_height: int) -> str:
     if text_img.getbbox():
         text_img = text_img.crop(text_img.getbbox())
 
-    # 2. Distortion (Wider)
+    # 2. Distortion (Ultra Wide)
     cur_w, cur_h = text_img.size
     
-    # === WIDTH CHANGE: WIDER ===
-    # Was: 2.0 -> Now: 2.5
-    distort_w = int(cur_w * 2.5) 
+    # === WIDTH CHANGE: ULTRA WIDE ===
+    # Was: 2.5 -> Now: 3.0
+    distort_w = int(cur_w * 3.0) 
     distort_h = int(cur_h * 1.5)
     
     text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
 
     # 3. Background Box (Tight)
-    # Reduced padding relative to the huge font so box isn't massive
     padding_x = int(base_font_size * 0.25) 
     padding_y = int(base_font_size * 0.15)
     
@@ -186,7 +186,7 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
         last_stream = "[bg]"
 
         if mode == "static":
-            margin = int(resolution * 0.02) # Slightly tighter margin for huge text
+            margin = int(resolution * 0.02)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         else:
             speed_x = resolution // 15
@@ -311,7 +311,7 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot v3.1**\n\n"
+        "**👋 Watermark Bot v3.2**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
         "2. **/w** - Animated Watermark (Smooth Bounce)\n"
         "3. **/settings** - Check config\n"
