@@ -121,7 +121,9 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         y_expr += "0" + ")" * POSITIONS
 
         # fade in/out inside each 10-second block (using single backslash for mod(t\,10) escape)
-        fade_expr = "min(mod(t\\,10)/1, (10-mod(t\\,10))/1)"
+        # fade in/out inside each 10-second block. Escaping both commas now.
+        # Python string: "min(A\\, B)" -> Shell command: min(A\, B)
+        fade_expr = "min(mod(t\\,10)/1\\, (10-mod(t\\,10))/1)"
 
         # ============================================
         # FIXED OVERLAY: Using 'alpha' parameter in overlay filter (Fix for Invalid argument error)
