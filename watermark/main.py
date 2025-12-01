@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Standard Library Only
+# Async Watermark Bot – Bigger & Bolder Text
 
 import os
 import time
@@ -7,7 +7,7 @@ import json
 import asyncio
 import logging
 import random
-import urllib.request  # <--- Changed from aiohttp to standard library
+import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from PIL import Image, ImageDraw, ImageFont
@@ -31,9 +31,9 @@ FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.t
 FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
 def check_resources():
-    """Downloads font using standard library (no pip install needed)."""
+    """Downloads font using standard library."""
     if not os.path.exists(FONT_PATH):
-        logger.info("Downloading font...")
+        logger.info("Downloading bold font...")
         try:
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
             logger.info("Font downloaded successfully.")
@@ -77,26 +77,32 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING ====================
-def create_watermark(text: str, scale=0.6) -> str:
-    # Try to load the downloaded font, fall back to default if failed
+# ==================== IMAGE PROCESSING (BIGGER/BOLDER) ====================
+def create_watermark(text: str, scale=0.85) -> str:
+    # Try to load the downloaded bold font at a much larger size (75)
     try:
-        font = ImageFont.truetype(FONT_PATH, 40)
+        font = ImageFont.truetype(FONT_PATH, 75)
     except:
+        # Fallback if download failed (will be small and not bold)
         font = ImageFont.load_default()
 
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
-    w, h = bbox[2] - bbox[0] + 40, bbox[3] - bbox[1] + 20
+    
+    # Increased padding for bigger text
+    w, h = bbox[2] - bbox[0] + 60, bbox[3] - bbox[1] + 40
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle((0, 0, w, h), radius=10, fill=(0, 0, 0, 160))
-    draw.text((20, 10), text, font=font, fill=(255, 255, 255, 230))
+    # Draw rounded box background
+    draw.rounded_rectangle((0, 0, w, h), radius=15, fill=(0, 0, 0, 160))
+    # Draw text centered in the new padding
+    draw.text((30, 20), text, font=font, fill=(255, 255, 255, 240))
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
     
+    # Less downsizing (scale=0.85 default now) to keep it big
     final_w, final_h = int(w * scale), int(h * scale)
     img = img.resize((final_w, final_h), Image.Resampling.LANCZOS)
     img.save(wm_path)
@@ -139,15 +145,16 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
             
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
-            max_x = max(0, scaled_w - wm_w - 20)
-            max_y = max(0, scaled_h - wm_h - 20)
+            # Ensure watermark doesn't get stuck if it's too big for the video
+            max_x = max(0, scaled_w - wm_w - 5)
+            max_y = max(0, scaled_h - wm_h - 5)
 
             interval = 5 
             hops = 8     
 
             for i in range(hops):
-                x = random.randint(10, max_x)
-                y = random.randint(10, max_y)
+                x = random.randint(5, max_x)
+                y = random.randint(5, max_y)
                 enable_expr = f"between(t,{i*interval},{(i+1)*interval})"
                 out_node = f"[v{i}]"
                 filter_complex += f"{last_stream}[1:v]overlay={x}:{y}:enable='{enable_expr}'{out_node};"
@@ -163,7 +170,6 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
 
         if mode == "animated":
             cmd_args.extend(["-map", last_stream])
-        # If static, we implicitly map the result of the single complex filter
         
         cmd_args.extend([
             "-map", "0:a?", "-c:v", "libx264", "-preset", "superfast",
@@ -313,6 +319,6 @@ async def media_handler(c, m):
         asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
-    check_resources() # Runs synchronously before bot start
+    check_resources()
     print("Bot Started...")
     app.run()
