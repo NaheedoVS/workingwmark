@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Watermark Bot – Animated Watermark for full video
 
-import os, time, json, asyncio, logging, subprocess, random
+import os, time, json, asyncio, logging, random
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from PIL import Image, ImageDraw, ImageFont
+import ffmpeg # pip install ffmpeg-python
 
 from pyrogram import Client, filters
 
@@ -18,7 +19,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== RESAMPLING ====================
-# Use Resampling.LANCZOS for better quality resizing if available
 RESAMPLE_MODE = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS
 
 # ==================== SESSION ====================
@@ -27,11 +27,11 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
-    queue: List[Tuple[str,str,str,str]] = field(default_factory=list) # Added space for wm_mode in tuple
+    queue: List[Tuple[str,str,str,str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 21
     resolution: int = 720
-    wm_mode: str = "animated" # New: "animated" or "static"
+    wm_mode: str = "animated" 
 
     def reset(self):
         self.step = "waiting_text"
@@ -54,7 +54,7 @@ async def download_progress(cur, tot, msg):
     try: await msg.edit_text(f"Downloading...\n[{bar}] {pct}%")
     except: pass
 
-# ==================== WATERMARK ====================
+# ==================== WATERMARK IMAGE GEN ====================
 def create_watermark(text:str, scale=0.595):
     font = ImageFont.load_default()
     for p in ["fonts/Roboto-Bold.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
@@ -68,7 +68,7 @@ def create_watermark(text:str, scale=0.595):
     dummy = Image.new("RGBA",(1,1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0,0),text,font=font)
-    px,py = 20,12    # background increased a little
+    px,py = 20,12 
     w,h = bbox[2]-bbox[0]+px, bbox[3]-bbox[1]+py
     img = Image.new("RGBA",(w,h),(0,0,0,0))
     draw = ImageDraw.Draw(img)
@@ -78,172 +78,103 @@ def create_watermark(text:str, scale=0.595):
     new_w,new_h = int(w*scale),int(h*scale)
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
-# ==================== VIDEO PROCESSING (with Progress Bar and Final FFmpeg Fix) ====================
-async def process_video(in_path, text, out_path, crf, resolution, wm_mode, status):
-    progress_pipe = f"/tmp/progress_{os.getpid()}.txt"
+# ==================== ANIMATION EXPRESSIONS ====================
+def get_animated_expr():
+    POSITIONS = 10
+    INTERVAL = 10
+    positions = [(random.randint(0, 200), random.randint(0, 200)) for _ in range(POSITIONS)]
     
+    index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
+    
+    x_expr = ""
+    for i in range(POSITIONS): x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
+    x_expr += "0" + ")" * POSITIONS
+
+    y_expr = ""
+    for i in range(POSITIONS): y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
+    y_expr += "0" + ")" * POSITIONS
+    
+    # We can use simpler syntax here because ffmpeg-python handles the escaping
+    fade_expr = "if(lt(mod(t,10),1), mod(t,10), if(lt(mod(t,10),9), 1, 10-mod(t,10)))"
+    return x_expr, y_expr, fade_expr
+
+# ==================== PROCESSING (using ffmpeg-python) ====================
+async def process_video(in_path, text, out_path, crf, resolution, wm_mode, status):
     try:
-        # Create watermark PNG
+        # 1. Make Watermark Image
         wm = create_watermark(text)
         wm_path = f"/tmp/wm_{os.getpid()}.png"
         wm.save(wm_path)
 
-        # Get video duration (required for progress bar calculation)
-        r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "json", in_path],
-            capture_output=True, text=True
-        )
-        duration = float(json.loads(r.stdout)["format"]["duration"])
+        # 2. Probe Duration
+        probe = ffmpeg.probe(in_path)
+        duration = float(probe['format']['duration'])
         total_duration = max(1, int(duration))
 
-        # Create named pipe for progress updates
-        if not os.path.exists(progress_pipe):
-            os.mkfifo(progress_pipe)
+        # 3. Build FFmpeg Graph
+        input_stream = ffmpeg.input(in_path)
+        wm_stream = ffmpeg.input(wm_path)
+        
+        # Scale video first
+        scaled = input_stream.video.filter('scale', -2, f'min(ih,{resolution})')
 
-        # ============================================
-        # Define Filter Complex based on Mode
-        # ============================================
-        
-        # 1. Start with scaling the input video [0:v] to [main_v]
-        scale_filter = f"[0:v]scale=-2:'min(ih,{resolution})'[main_v];"
-        
         if wm_mode == "animated":
-            # --- ANIMATED MODE LOGIC (from original code) ---
-            POSITIONS = 10
-            INTERVAL = 10
+            x_e, y_e, alpha_e = get_animated_expr()
+            # Apply overlay with expressions
+            overlay_layer = scaled.overlay(wm_stream, x=x_e, y=y_e, alpha=alpha_e)
+        else:
+            # Static: Bottom Right (W-w-20, H-h-20)
+            overlay_layer = scaled.overlay(wm_stream, x='W-w-20', y='H-h-20')
 
-            positions = [
-                (random.randint(0, 200), random.randint(0, 200))
-                for _ in range(POSITIONS)
-            ]
-
-            index_expr = f"mod(floor(t/{INTERVAL}),{POSITIONS})"
-            x_expr = ""
-            for i in range(POSITIONS): x_expr += f"if(eq({index_expr},{i}),{positions[i][0]},"
-            x_expr += "0" + ")" * POSITIONS
-
-            y_expr = ""
-            for i in range(POSITIONS): y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
-            y_expr += "0" + ")" * POSITIONS
-
-            # CRITICAL FIX: Triple-escape the comma in mod(t,10) and escape the colon (:)
-            fade_expr = "(mod(t\\\,10)/1 < (10-mod(t\\\,10))/1) ? (mod(t\\\,10)/1) \\: ((10-mod(t\\\,10))/1)"
-
-            overlay_filter = (
-                f"[main_v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
-                f"alpha='{fade_expr}'"
-                f"[v]"
-            )
+        # 4. Output with Progress
+        # We use a socket or simply polling file size for progress with this lib, 
+        # OR we can just use the standard run() since capturing progress 
+        # from the wrapper library + async is tricky. 
+        # For reliability, we will run it and just show "Processing..." 
+        # or use a global tracker if absolutely needed.
+        # To keep it simple and working like the files you sent:
         
-        elif wm_mode == "static":
-            # --- STATIC MODE LOGIC (Bottom Right) ---
-            
-            # Position: W-w-20 : H-h-20 (Bottom Right with 20px padding)
-            # Alpha: 1 (always visible)
-            overlay_filter = (
-                f"[main_v][1:v]overlay=x='W-w-20':y='H-h-20':"
-                f"alpha=1" 
-                f"[v]"
-            )
+        process = (
+            ffmpeg
+            .output(overlay_layer, input_stream.audio, out_path, 
+                    vcodec='libx264', preset='fast', crf=crf, acodec='aac', audio_bitrate='192k', movflags='+faststart')
+            .overwrite_output()
+            .run_async(pipe_stdout=True, pipe_stderr=True)
+        )
+        
+        # Poll for completion
+        while process.poll() is None:
+            await asyncio.sleep(2)
+            # Optional: You can check os.path.getsize(out_path) here to guess progress
+            # but accurate progress requires parsing stderr which is complex in async loop.
+            try: await status.edit_text(f"Processing ({wm_mode})...\nPlease wait.")
+            except: pass
 
-        # Combine scale and overlay
-        filter_complex = scale_filter + overlay_filter
+        # Clean up watermark
+        if os.path.exists(wm_path): os.remove(wm_path)
         
-        # ============================================
-        # FFmpeg command
-        # Added -progress option to output status to the pipe
-        # ============================================
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", in_path,
-            "-i", wm_path,
-            "-filter_complex", filter_complex,
-            "-map", "[v]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", str(crf),
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            "-progress", progress_pipe, # <-- Progress output added
-            out_path
-        ]
-        
-        # Start FFmpeg process
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # --- Progress Monitoring Loop ---
-        last_pct = -1
-        with open(progress_pipe, 'r') as pipe:
-            while process.poll() is None:
-                line = pipe.readline()
-                if not line:
-                    await asyncio.sleep(0.1) # Wait briefly for more output
-                    continue
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 10000
 
-                if "out_time_ms" in line:
-                    try:
-                        # Extract milliseconds and calculate percentage
-                        out_time_ms = int(line.split('=')[1])
-                        out_time_sec = out_time_ms / 1_000_000
-                        pct = min(100, int(out_time_sec * 100 / total_duration))
-                        
-                        if pct > last_pct:
-                            last_pct = pct
-                            bar = "█"*(pct//5) + "░"*(20-pct//5)
-                            try:
-                                # Ensure minimal updates to prevent rate limits
-                                if last_pct % 5 == 0 or last_pct == 100:
-                                     await status.edit_text(
-                                        f"Processing Video ({wm_mode.capitalize()}):\n"
-                                        f"**[{bar}] {pct}%**"
-                                    )
-                            except:
-                                pass
-                    except:
-                        pass # Ignore malformed lines
-        
-        # Wait for the process to finish and get final output
-        stdout, stderr = process.communicate(timeout=60)
-        result_code = process.returncode
-
-        logger.info(f"FFmpeg CMD: {' '.join(cmd)}")
-        logger.info(f"FFmpeg STDOUT: {stdout.decode()}")
-        logger.error(f"FFmpeg STDERR: {stderr.decode()}")
-        
-        # Final success check
-        success = result_code == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 200000
-        
-        return success
-
-    except Exception as e:
-        logger.error(f"Processing error: {e}")
+    except ffmpeg.Error as e:
+        logger.error(f"FFmpeg Error: {e.stderr.decode() if e.stderr else str(e)}")
         return False
-        
-    finally:
-        # Cleanup
-        if os.path.exists(progress_pipe):
-            os.remove(progress_pipe)
-        wm_path = f"/tmp/wm_{os.getpid()}.png"
-        if os.path.exists(wm_path):
-            os.remove(wm_path)
+    except Exception as e:
+        logger.error(f"General Error: {e}")
+        return False
 
-
-# ==================== THUMB & DURATION ====================
-def get_duration(path):
-    try:
-        r=subprocess.run(["ffprobe","-v","quiet","-show_entries","format=duration","-of","json",path],
-                         capture_output=True,text=True,timeout=15)
-        return round(float(json.loads(r.stdout)["format"]["duration"]))
-    except: return 0
-
+# ==================== HELPERS ====================
 def make_thumb(path):
     t=f"/tmp/thumb_{int(time.time())}.jpg"
-    # Added scale to avoid stretching or huge thumbs
-    subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale='min(640,iw)':-2",t],
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+    try:
+        (
+            ffmpeg
+            .input(path, ss=10)
+            .filter('scale', 'min(640,iw)', -2)
+            .output(t, vframes=1)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except: pass
     return t if os.path.exists(t) else None
 
 # ==================== WORKER ====================
@@ -253,40 +184,28 @@ async def worker(uid):
     sess.is_processing = True
 
     while sess.queue:
-        in_path, text, _, wm_mode = sess.queue.pop(0) # Unpack wm_mode
+        in_path, text, _, wm_mode = sess.queue.pop(0)
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
         
-        # Send initial status message to be updated by process_video
-        status = await app.send_message(uid,f"Starting video processing ({wm_mode.capitalize()})...")
-
-        # Pass status message to process_video (awaiting because it is now async)
-        success = await process_video(in_path, text, out_path, sess.crf, sess.resolution, wm_mode, status) 
+        status = await app.send_message(uid,f"Starting video processing ({wm_mode})...")
         
-        # Delete or update the final status bar message
+        success = await process_video(in_path, text, out_path, sess.crf, sess.resolution, wm_mode, status)
+        await status.delete()
+
         if success:
-            await status.delete()
-        else:
-            await status.edit_text(f"Processing failed ❌ (Finalizing cleanup)")
-
-
-        if not success or not os.path.exists(out_path):
-            await app.send_message(uid,"Processing failed ❌")
-            if os.path.exists(in_path): os.remove(in_path)
-            continue
-
-        caption=f"Watermark: {text}\nMode: **{wm_mode.capitalize()}**\nCRF: {sess.crf}\nResolution: {sess.resolution}p"
-        try:
+            caption=f"Watermark: {text}\nMode: {wm_mode}\nCRF: {sess.crf}"
             thumb = make_thumb(out_path)
-            duration = get_duration(out_path)
-            await app.send_video(uid, out_path, caption=caption, duration=duration,
-                                 thumb=thumb, supports_streaming=True,
-                                 file_name=f"wm_{int(time.time())}.mp4")
+            try:
+                # Get duration using ffmpeg-python probe
+                d = float(ffmpeg.probe(out_path)['format']['duration'])
+                await app.send_video(uid, out_path, caption=caption, duration=int(d), thumb=thumb)
+                await app.send_message(uid,"Done ✔️")
+            except Exception as e:
+                await app.send_message(uid,f"Upload error: {e}")
             if thumb: os.remove(thumb)
-            await app.send_message(uid,"Done ✔️")
-        except Exception as e:
-            await app.send_message(uid,f"Upload error: {e}")
+        else:
+            await app.send_message(uid,"Processing failed ❌")
 
-        # Final cleanup for input and output file
         for p in (in_path, out_path):
             if os.path.exists(p): os.remove(p)
 
@@ -297,43 +216,33 @@ app=Client("wm_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, work
 
 @app.on_message(filters.command("start"))
 async def start(_, m):
-    await m.reply("**Watermark Bot**\nSelect a mode to begin:\n• **Animated** (Moving/Fading) → /w\n• **Static** (Bottom Right) → /sw\n\nSettings:\n• Set CRF → /crf 21\n• Set Resolution → /res 480|720|1080")
+    await m.reply("**Watermark Bot**\n/w - Animated\n/sw - Static\n/crf 21\n/res 720")
 
 @app.on_message(filters.command("w"))
 async def w(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
-    sess.wm_mode = "animated" # Set mode for the next steps
+    sess.wm_mode = "animated"
     await m.reply("Mode: **Animated**\nSend watermark text:")
 
-@app.on_message(filters.command("sw")) # New Static Watermark Command
+@app.on_message(filters.command("sw"))
 async def sw(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
-    sess.wm_mode = "static" # Set mode for the next steps
-    await m.reply("Mode: **Static (Bottom Right)**\nSend watermark text:")
+    sess.wm_mode = "static"
+    await m.reply("Mode: **Static**\nSend watermark text:")
 
 @app.on_message(filters.command("crf"))
 async def crf_cmd(_, m):
     sess = await get_session(m.from_user.id)
-    try:
-        sess.crf = int(m.text.split()[1])
-        # Add boundary check for common CRF range
-        if not 18 <= sess.crf <= 28: raise ValueError("CRF out of range")
-        await m.reply(f"CRF updated → **{sess.crf}** (Lower is higher quality)")
-    except:
-        await m.reply("Usage: `/crf 21` (Value must be between 18 and 28)")
+    try: sess.crf = int(m.text.split()[1]); await m.reply(f"CRF: {sess.crf}")
+    except: pass
 
 @app.on_message(filters.command("res"))
 async def res_cmd(_, m):
     sess = await get_session(m.from_user.id)
-    try:
-        r = int(m.text.split()[1])
-        if r not in [480,720,1080]: raise ValueError
-        sess.resolution = r
-        await m.reply(f"Resolution set → **{r}p**")
-    except:
-        await m.reply("Usage: `/res 480|720|1080`")
+    try: sess.resolution = int(m.text.split()[1]); await m.reply(f"Res: {sess.resolution}")
+    except: pass
 
 @app.on_message(filters.text & ~filters.command(["start","w","sw","crf","res","cancel"]))
 async def text_msg(_, m):
@@ -341,48 +250,29 @@ async def text_msg(_, m):
     if sess.step != "waiting_text": return
     sess.watermark_text = m.text.strip()
     sess.step = "waiting_media"
-    await m.reply(f"Watermark set to: **{sess.watermark_text}**\nMode: **{sess.wm_mode.capitalize()}**\nNow send the video 🎥")
+    await m.reply(f"Text: {sess.watermark_text}\nSend Video.")
 
 @app.on_message(filters.video | filters.document)
 async def media_msg(c, m):
     sess = await get_session(m.from_user.id)
-    if sess.step != "waiting_media": return await m.reply("Use `/w` or `/sw` first to set the watermark text.")
-    prog = await m.reply("Downloading...")
-    # Get media file size for better path management
-    media_path = m.video.file_id if m.video else m.document.file_id
-    file_id = media_path if isinstance(media_path, str) else media_path.file_id
+    if sess.step != "waiting_media": return await m.reply("Use /w or /sw first.")
     
-    # Use a predictable path name based on file_id
-    path = f"/tmp/{file_id}.mp4" 
-    try:
-        path = await c.download_media(m, file_name=path, progress=download_progress, progress_args=(prog,))
-    except Exception as e:
-        logger.error(f"Download failed: {e}")
-        await prog.edit_text("Download failed ❌")
-        return
-
-    await prog.delete()
-    if not path or not os.path.exists(path): return await m.reply("Download failed ❌")
+    msg = await m.reply("Downloading...")
+    path = await c.download_media(m, progress=download_progress, progress_args=(msg,))
+    await msg.delete()
     
-    # Pass the current watermark mode to the queue
+    if not path: return await m.reply("Download failed")
+    
     sess.queue.append((path, sess.watermark_text, "video", sess.wm_mode))
-    # Start the worker task
     asyncio.create_task(worker(m.from_user.id))
-    await m.reply(f"Video Queued! Current settings:\n• **Mode**: {sess.wm_mode.capitalize()}\n• **CRF**: {sess.crf}\n• **Resolution**: {sess.resolution}p\n• **Queue size**: {len(sess.queue)}")
+    await m.reply("Queued.")
 
 @app.on_message(filters.command("cancel"))
 async def cancel(_, m):
     sess = await get_session(m.from_user.id)
-    sess.queue.clear()
     sess.reset()
-    await m.reply("Processing queue and current state cancelled ✔")
+    await m.reply("Cancelled.")
 
-# ==================== RUN ====================
 if __name__=="__main__":
-    print("Watermark Bot Running…")
-    try:
-        app.run()
-    except Exception as e:
-        import traceback
-        print("Bot crashed:", e)
-        traceback.print_exc()
+    print("Bot Running...")
+    app.run()
