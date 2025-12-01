@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Massive Text (1/5th Height) + Ultra Wide + Progress Bar
+# Async Watermark Bot – Massive Text (1/3rd Height) + Tighter Box + Progress Bar
 
 import os
 import re
@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
 
 # ==================== CONFIG ====================
-API_ID = int(os.environ.get("API_ID", "0")) 
+API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 WORK_DIR = "downloads"
@@ -47,7 +47,7 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
-    watermark_mode: str = "static" 
+    watermark_mode: str = "static"
     queue: List[Tuple[str, str, str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 23
@@ -82,8 +82,8 @@ def render_bar(current, total):
 
 async def download_progress(current, total, status_msg, start_time):
     now = time.time()
-    if (now - start_time) < 3 and current < total: 
-        return 
+    if (now - start_time) < 3 and current < total:
+        return
     try:
         await status_msg.edit_text(f"⬇️ **Downloading...**\n{render_bar(current, total)}")
     except:
@@ -93,15 +93,14 @@ async def download_progress(current, total, status_msg, start_time):
 def create_watermark(text: str, target_video_height: int) -> str:
     # Supersampling Factor (High Quality)
     scale_factor = 3
-    
-    # === SIZE CHANGE: MASSIVE ===
-    # Was: // 7 -> Now: // 5 (Takes up 20% of vertical screen space)
-    base_font_size = int((target_video_height // 5) * scale_factor)
-    
+
+    # === SIZE CHANGE: EVEN BIGGER ===
+    # Was: // 5 -> Now: // 3 (Takes up 1/3rd of vertical screen space)
+    base_font_size = int((target_video_height // 3) * scale_factor)
+
     try:
         font = ImageFont.truetype(FONT_PATH, base_font_size)
     except:
-        # Fallback note: If you see tiny text, it means the font failed to download.
         font = ImageFont.load_default()
 
     # 1. Text Layer
@@ -113,31 +112,32 @@ def create_watermark(text: str, target_video_height: int) -> str:
     text_img = Image.new("RGBA", (w_raw, h_raw + (40 * scale_factor)), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
-    
+
     if text_img.getbbox():
         text_img = text_img.crop(text_img.getbbox())
 
     # 2. Distortion (Ultra Wide)
     cur_w, cur_h = text_img.size
-    
-    # === WIDTH CHANGE: ULTRA WIDE ===
-    # Was: 2.5 -> Now: 3.0
-    distort_w = int(cur_w * 3.0) 
+
+    # Reduced width stretch slightly to balance new height
+    distort_w = int(cur_w * 2.5)
     distort_h = int(cur_h * 1.5)
-    
+
     text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
 
-    # 3. Background Box (Tight)
-    padding_x = int(base_font_size * 0.25) 
-    padding_y = int(base_font_size * 0.15)
-    
+    # 3. Background Box (Very Tight)
+    # === PADDING CHANGE: TIGHTER BOX ===
+    # Significantly reduced padding multipliers
+    padding_x = int(base_font_size * 0.08) # Was 0.25
+    padding_y = int(base_font_size * 0.04) # Was 0.15
+
     box_w = distort_w + (padding_x * 2)
     box_h = distort_h + (padding_y * 2)
 
     bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(bg_img)
-    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 2, fill=(0, 0, 0, 180))
-    
+    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 4, fill=(0, 0, 0, 180))
+
     px = (box_w - distort_w) // 2
     py = (box_h - distort_h) // 2
     bg_img.paste(text_img, (px, py), text_img)
@@ -167,8 +167,8 @@ async def get_video_info(path):
         meta = json.loads(stdout)
         stream = meta["streams"][0]
         return (
-            int(stream.get("width", 0)), 
-            int(stream.get("height", 0)), 
+            int(stream.get("width", 0)),
+            int(stream.get("height", 0)),
             float(stream.get("duration", 0))
         )
     except:
@@ -178,15 +178,16 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
     wm_path = None
     try:
         in_w, in_h, duration = await get_video_info(in_path)
-        if duration == 0: duration = 1 
+        if duration == 0: duration = 1
 
         wm_path = create_watermark(text, resolution)
-        
+
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
-            margin = int(resolution * 0.02)
+            # Increased margin slightly for the much larger text
+            margin = int(resolution * 0.03)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         else:
             speed_x = resolution // 15
@@ -199,31 +200,31 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
             "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_complex,
             "-map", "0:a?", "-c:v", "libx264", "-preset", "faster",
-            "-crf", str(crf), "-c:a", "aac", "-b:a", "192k", 
+            "-crf", str(crf), "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", out_path
         ]
 
         process = await asyncio.create_subprocess_exec(
-            *cmd_args, 
-            stdout=asyncio.subprocess.PIPE, 
+            *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
 
         last_update_time = time.time()
-        
+
         while True:
             line = await process.stderr.readline()
             if not line:
                 break
-            
+
             line_str = line.decode('utf-8', errors='ignore')
-            
+
             if "time=" in line_str:
                 time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line_str)
                 if time_match:
                     current_time_str = time_match.group(1)
                     current_seconds = time_to_seconds(current_time_str)
-                    
+
                     if time.time() - last_update_time > 4:
                         bar = render_bar(current_seconds, duration)
                         try:
@@ -268,17 +269,17 @@ async def worker(uid):
         while sess.queue:
             in_path, text, _ = sess.queue.pop(0)
             out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}.mp4")
-            
+
             status_msg = await app.send_message(uid, f"⏳ **Starting FFmpeg...**")
             start_t = time.time()
-            
+
             success = await process_video(
-                in_path, text, out_path, 
-                sess.crf, sess.resolution, 
+                in_path, text, out_path,
+                sess.crf, sess.resolution,
                 status_msg,
                 mode=sess.watermark_mode
             )
-            
+
             if success:
                 dur = int(time.time() - start_t)
                 thumb = await generate_thumbnail(out_path)
@@ -288,7 +289,7 @@ async def worker(uid):
                     f"📝 `{text}`"
                 )
                 await status_msg.edit_text(f"📤 **Uploading...**\n{render_bar(0, 100)}")
-                
+
                 start_up = time.time()
                 await app.send_video(
                     uid, out_path, caption=caption, thumb=thumb, supports_streaming=True,
@@ -301,7 +302,7 @@ async def worker(uid):
             await status_msg.delete()
             if os.path.exists(in_path): os.remove(in_path)
             if os.path.exists(out_path): os.remove(out_path)
-            
+
     finally:
         sess.is_processing = False
 
@@ -311,7 +312,7 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot v3.2**\n\n"
+        "**👋 Watermark Bot v3.3**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
         "2. **/w** - Animated Watermark (Smooth Bounce)\n"
         "3. **/settings** - Check config\n"
@@ -365,7 +366,7 @@ async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
     if sess.step != "waiting_media":
         return await m.reply("⚠️ Use /ws or /w first.")
-    
+
     file = m.video or m.document
     if m.document and "video" not in m.document.mime_type:
         return await m.reply("❌ Not a video.")
