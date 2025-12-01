@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Bottom Right + Bigger Text + Cleaner Look
+# Async Watermark Bot – Bottom Right + Larger + Thicker
 
 import os
 import time
@@ -27,7 +27,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== RESOURCES ====================
-# Keeping Roboto-Bold, but we will remove the extra stroke to make it cleaner
 FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
 FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
@@ -80,8 +79,8 @@ async def progress_bar(current, total, status_msg, start_time):
 
 # ==================== IMAGE PROCESSING ====================
 def create_watermark(text: str) -> str:
-    # 1. INCREASED SIZE (Was 46, now 60)
-    font_size = 60 
+    # 1. TEXT SIZE INCREASED (Was 60 -> Now 75)
+    font_size = 75
     try:
         font = ImageFont.truetype(FONT_PATH, font_size)
     except:
@@ -90,18 +89,17 @@ def create_watermark(text: str) -> str:
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     
-    # 2. REDUCED THICKNESS (Was 2, now 0)
-    # Setting this to 0 removes the extra "blobby" outline, making it crisp.
-    stroke = 0 
+    # 2. THICKNESS INCREASED (Stroke width 3)
+    stroke = 3
     
     # Get exact text size
     bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     
-    # 3. Define Padding (Scaled up slightly for larger text)
-    padding_x = 28  
-    padding_y = 16  
+    # 3. Padding (Scaled up for larger text)
+    padding_x = 32  
+    padding_y = 18  
     
     box_width = text_width + (padding_x * 2)
     box_height = text_height + (padding_y * 2)
@@ -118,7 +116,7 @@ def create_watermark(text: str) -> str:
     
     # 5. Draw Text
     draw.text(
-        (box_width / 2, box_height / 2 - 3), # -3 for alignment correction
+        (box_width / 2, box_height / 2 - 4), # -4 for visual centering correction
         text, 
         font=font, 
         fill=(255, 255, 255, 255),
