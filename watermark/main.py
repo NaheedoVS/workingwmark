@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== RESAMPLING ====================
+# Use Resampling.LANCZOS for better quality resizing if available
 RESAMPLE_MODE = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS
 
 # ==================== SESSION ====================
@@ -66,7 +67,7 @@ def create_watermark(text:str, scale=0.595):
     dummy = Image.new("RGBA",(1,1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0,0),text,font=font)
-    px,py = 20,12   # background increased a little
+    px,py = 20,12    # background increased a little
     w,h = bbox[2]-bbox[0]+px, bbox[3]-bbox[1]+py
     img = Image.new("RGBA",(w,h),(0,0,0,0))
     draw = ImageDraw.Draw(img)
@@ -76,7 +77,7 @@ def create_watermark(text:str, scale=0.595):
     new_w,new_h = int(w*scale),int(h*scale)
     return img.resize((new_w,new_h),RESAMPLE_MODE)
 
-# ==================== VIDEO PROCESSING ====================
+# ==================== VIDEO PROCESSING (FIX APPLIED HERE) ====================
 def process_video(in_path, text, out_path, crf=21, resolution=720):
     try:
         # Create watermark PNG
@@ -119,15 +120,17 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
         y_expr += "0" + ")" * POSITIONS
 
-        # fade in/out inside each 10-second block
+        # fade in/out inside each 10-second block (using single backslash for mod(t\,10) escape)
         fade_expr = "min(mod(t\\,10)/1, (10-mod(t\\,10))/1)"
 
         # ============================================
-        # FIXED OVERLAY (NO alpha=, uses colorchannelmixer)
+        # FIXED OVERLAY: Using 'alpha' parameter in overlay filter (Fix for Invalid argument error)
         # ============================================
+        # Removed colorchannelmixer. Using [0:v] (video) and [1:v] (watermark) directly
         overlay_filter = (
-            f"[1:v]format=rgba,colorchannelmixer=aa='{fade_expr}'[wm];"
-            f"[0:v][wm]overlay=x='{x_expr}':y='{y_expr}':format=auto[v]"
+            f"[0:v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
+            f"alpha='{fade_expr}':" # Apply fade expression to the overlay's alpha
+            f"format=auto[v]"
         )
 
         # ============================================
@@ -146,6 +149,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             "-c:a", "aac",
             "-b:a", "192k",
             "-movflags", "+faststart",
+            "-vf", f"scale=-2:'min(ih,{resolution})'", # Add resolution scaling filter
             out_path
         ]
 
@@ -156,6 +160,7 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
 
         os.remove(wm_path)
 
+        # Check for success and minimum output size
         return result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 200000
 
     except Exception as e:
@@ -173,7 +178,8 @@ def get_duration(path):
 
 def make_thumb(path):
     t=f"/tmp/thumb_{int(time.time())}.jpg"
-    subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale=640:-2",t],
+    # Added aspect ratio correction for thumbnail scaling
+    subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale='min(640,iw)':-2",t],
                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
     return t if os.path.exists(t) else None
 
@@ -188,6 +194,7 @@ async def worker(uid):
         out_path = f"/tmp/out_{uid}_{int(time.time())}.mp4"
         status = await app.send_message(uid,"Processing video + watermark...")
 
+        # Pass crf and resolution to the processing function
         success = process_video(in_path, text, out_path, sess.crf, sess.resolution)
         await status.delete()
 
@@ -231,9 +238,11 @@ async def crf_cmd(_, m):
     sess = await get_session(m.from_user.id)
     try:
         sess.crf = int(m.text.split()[1])
-        await m.reply(f"CRF updated → {sess.crf}")
+        # Add boundary check for common CRF range
+        if not 18 <= sess.crf <= 28: raise ValueError("CRF out of range")
+        await m.reply(f"CRF updated → **{sess.crf}** (Lower is higher quality)")
     except:
-        await m.reply("Usage: /crf 21")
+        await m.reply("Usage: `/crf 21` (Value must be between 18 and 28)")
 
 @app.on_message(filters.command("res"))
 async def res_cmd(_, m):
@@ -242,9 +251,9 @@ async def res_cmd(_, m):
         r = int(m.text.split()[1])
         if r not in [480,720,1080]: raise ValueError
         sess.resolution = r
-        await m.reply(f"Resolution set → {r}p")
+        await m.reply(f"Resolution set → **{r}p**")
     except:
-        await m.reply("Usage: /res 480|720|1080")
+        await m.reply("Usage: `/res 480|720|1080`")
 
 @app.on_message(filters.text & ~filters.command(["start","w","crf","res","cancel"]))
 async def text_msg(_, m):
@@ -252,26 +261,40 @@ async def text_msg(_, m):
     if sess.step != "waiting_text": return
     sess.watermark_text = m.text.strip()
     sess.step = "waiting_media"
-    await m.reply("Now send video 🎥")
+    await m.reply(f"Watermark set to: **{sess.watermark_text}**\nNow send the video 🎥")
 
 @app.on_message(filters.video | filters.document)
 async def media_msg(c, m):
     sess = await get_session(m.from_user.id)
-    if sess.step != "waiting_media": return await m.reply("Use /w first")
+    if sess.step != "waiting_media": return await m.reply("Use `/w` first to set the watermark text.")
     prog = await m.reply("Downloading...")
-    path = await c.download_media(m, progress=download_progress, progress_args=(prog,))
+    # Get media file size for better path management
+    media_path = m.video.file_id if m.video else m.document.file_id
+    file_id = media_path if isinstance(media_path, str) else media_path.file_id
+    
+    # Use a predictable path name based on file_id
+    path = f"/tmp/{file_id}.mp4" 
+    try:
+        path = await c.download_media(m, file_name=path, progress=download_progress, progress_args=(prog,))
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        await prog.edit_text("Download failed ❌")
+        return
+
     await prog.delete()
-    if not path: return await m.reply("Download failed ❌")
+    if not path or not os.path.exists(path): return await m.reply("Download failed ❌")
+    
     sess.queue.append((path, sess.watermark_text, "video"))
+    # Start the worker task
     asyncio.create_task(worker(m.from_user.id))
-    await m.reply(f"Queued | CRF {sess.crf} | Resolution {sess.resolution}p")
+    await m.reply(f"Video Queued! Current settings:\n• **CRF**: {sess.crf}\n• **Resolution**: {sess.resolution}p\n• **Queue size**: {len(sess.queue)}")
 
 @app.on_message(filters.command("cancel"))
 async def cancel(_, m):
     sess = await get_session(m.from_user.id)
     sess.queue.clear()
     sess.reset()
-    await m.reply("Cancelled ✔")
+    await m.reply("Processing queue and current state cancelled ✔")
 
 # ==================== RUN ====================
 if __name__=="__main__":
@@ -282,4 +305,3 @@ if __name__=="__main__":
         import traceback
         print("Bot crashed:", e)
         traceback.print_exc()
-        
