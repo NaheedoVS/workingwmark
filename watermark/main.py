@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Bigger & Bolder Text
+# Async Watermark Bot – Huge Text, Tighter Box
 
 import os
 import time
@@ -77,32 +77,33 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (BIGGER/BOLDER) ====================
+# ==================== IMAGE PROCESSING (HUGE TEXT, TIGHT BOX) ====================
 def create_watermark(text: str, scale=0.85) -> str:
-    # Try to load the downloaded bold font at a much larger size (75)
+    # 1. Increased font size to 100 (was 75)
     try:
-        font = ImageFont.truetype(FONT_PATH, 75)
+        font = ImageFont.truetype(FONT_PATH, 100)
     except:
-        # Fallback if download failed (will be small and not bold)
         font = ImageFont.load_default()
 
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    # Increased padding for bigger text
-    w, h = bbox[2] - bbox[0] + 60, bbox[3] - bbox[1] + 40
+    # 2. Reduced padding for a tighter box
+    # Adding 30 total width (15px each side) and 20 total height (10px top/bottom)
+    # (Was +60 and +40 previously)
+    w, h = bbox[2] - bbox[0] + 30, bbox[3] - bbox[1] + 20
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     # Draw rounded box background
     draw.rounded_rectangle((0, 0, w, h), radius=15, fill=(0, 0, 0, 160))
-    # Draw text centered in the new padding
-    draw.text((30, 20), text, font=font, fill=(255, 255, 255, 240))
+    
+    # Draw text centered in the new tighter padding (at coordinates 15, 10)
+    draw.text((15, 10), text, font=font, fill=(255, 255, 255, 240))
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
     
-    # Less downsizing (scale=0.85 default now) to keep it big
     final_w, final_h = int(w * scale), int(h * scale)
     img = img.resize((final_w, final_h), Image.Resampling.LANCZOS)
     img.save(wm_path)
