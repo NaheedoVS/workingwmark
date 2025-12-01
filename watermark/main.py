@@ -90,8 +90,6 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
         duration = max(1, int(duration))
 
         # Prepare filter_complex for animated watermark
-        # Move watermark every 10s with fade-in/out 1s
-        segments = []
         block = 10
         num_blocks = (duration // block) + 1
         overlays = []
@@ -100,9 +98,14 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             x = random.randint(0, max(0, resolution - wm.width))
             y = random.randint(0, max(0, resolution - wm.height))
             start = i*block
-            end = min((i+1)*block,duration)
-            overlays.append(f"[0:v][1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})',format=yuv420p[v{i}];")
-        
+            end = min((i+1)*block, duration)
+
+            in_map = "[0:v]" if i==0 else f"[v{i-1}]"
+            out_map = f"[v{i}]"
+            overlays.append(
+                f"{in_map}[1:v]overlay=x={x}:y={y}:enable='between(t,{start},{end})',format=yuv420p{out_map};"
+            )
+
         filter_chain = "".join(overlays)
         last_map = f"[v{num_blocks-1}]" if num_blocks>0 else "[0:v]"
 
