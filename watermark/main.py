@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Exact "Social Media Tag" Replica + Progress Bar
+# Async Watermark Bot – Size h/12 + Fixed Font + Progress Bar
 
 import os
 import re
@@ -27,29 +27,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== RESOURCES ====================
-# Using Roboto-Medium for that specific Instagram tag look
-FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Medium.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Roboto-Medium.ttf")
+# ==================== RESOURCES (FIXED) ====================
+FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
 def check_resources():
-    """Downloads font with a fake User-Agent."""
+    """Downloads font with a fake User-Agent to prevent 403 Forbidden errors."""
     if not os.path.exists(FONT_PATH):
-        logger.info("Downloading font...")
+        logger.info("Downloading bold font...")
         try:
             opener = urllib.request.build_opener()
-            opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
             urllib.request.install_opener(opener)
+            
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
             logger.info("Font downloaded successfully.")
         except Exception as e:
             logger.error(f"Could not download font: {e}")
 
 def get_font(size):
+    """Tries to load downloaded font, then system font, then default."""
     try:
         return ImageFont.truetype(FONT_PATH, size)
     except:
-        return ImageFont.load_default()
+        pass
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+    except:
+        pass
+    return ImageFont.load_default()
 
 # ==================== SESSION MANAGER ====================
 @dataclass
@@ -99,15 +105,16 @@ async def download_progress(current, total, status_msg, start_time):
     except:
         pass
 
-# ==================== EXACT REPLICA WATERMARK GENERATION ====================
+# ==================== WATERMARK GENERATION (h/12) ====================
 def create_watermark(text: str, target_video_height: int) -> str:
-    scale_factor = 3 # High quality render
+    # Supersampling for crisp edges
+    scale_factor = 3
     
-    # === SIZE ADJUSTMENT ===
-    # The tag in your screenshot is small and elegant.
-    # Height // 22 is the standard ratio for that specific look.
-    base_font_size = int((target_video_height // 22) * scale_factor)
+    # === SIZE CALCULATION: h/12 ===
+    # This creates a medium-large watermark
+    base_font_size = int((target_video_height // 12) * scale_factor)
     
+    # Load Font
     font = get_font(base_font_size)
 
     # 1. Text Layer
@@ -116,34 +123,35 @@ def create_watermark(text: str, target_video_height: int) -> str:
     w_raw = bbox[2] - bbox[0]
     h_raw = bbox[3] - bbox[1]
 
-    text_img = Image.new("RGBA", (w_raw, h_raw + (20 * scale_factor)), (0,0,0,0))
+    text_img = Image.new("RGBA", (w_raw, h_raw + (40 * scale_factor)), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
-    # White Text, No Stroke (Clean look like image)
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
     
     if text_img.getbbox():
         text_img = text_img.crop(text_img.getbbox())
 
-    # 2. No Stretching (Normal Aspect Ratio)
-    # The image you showed has normal text, not wide text.
+    # 2. Distortion/Scaling
+    # Kept natural (1:1) or slightly wide (1.1) for readability
     cur_w, cur_h = text_img.size
+    distort_w = int(cur_w * 1.0) 
+    distort_h = int(cur_h * 1.0)
     
-    # 3. Background Box (Pill Shape)
-    # Calculating padding to look exactly like the screenshot tag
-    padding_x = int(base_font_size * 0.60) # Side padding
-    padding_y = int(base_font_size * 0.30) # Top/Bottom padding
+    text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
+
+    # 3. Background Box
+    # Calculated relative to font size for consistency
+    padding_x = int(base_font_size * 0.4) 
+    padding_y = int(base_font_size * 0.2)
     
-    box_w = cur_w + (padding_x * 2)
-    box_h = cur_h + (padding_y * 2)
+    box_w = distort_w + (padding_x * 2)
+    box_h = distort_h + (padding_y * 2)
 
     bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(bg_img)
-    
-    # Rounded Rectangle (Pill) - Radius = half of height
     draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 2, fill=(0, 0, 0, 180))
     
-    px = (box_w - cur_w) // 2
-    py = (box_h - cur_h) // 2
+    px = (box_w - distort_w) // 2
+    py = (box_h - distort_h) // 2
     bg_img.paste(text_img, (px, py), text_img)
 
     # 4. Final Downscale
@@ -190,12 +198,10 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
         last_stream = "[bg]"
 
         if mode == "static":
-            # ================= STATIC MODE =================
-            # Bottom Right, Standard Margin
-            margin = int(resolution * 0.04) 
+            # Margin = 3% of resolution (Standard nice padding)
+            margin = int(resolution * 0.03)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         else:
-            # ================= ANIMATED MODE =================
             speed_x = resolution // 15
             speed_y = resolution // 20
             x_expr = f"abs(mod(t*{speed_x}, 2*(W-w)) - (W-w))"
@@ -318,7 +324,7 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot v3.6**\n\n"
+        "**👋 Watermark Bot v3.7 (Size h/12)**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
         "2. **/w** - Animated Watermark (Smooth Bounce)\n"
         "3. **/settings** - Check config\n"
