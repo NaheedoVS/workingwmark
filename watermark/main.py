@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Rounded Box Style + Bottom Right Position
+# Async Watermark Bot – Bottom Right + Thick Text (Rounded Box Style)
 
 import os
 import time
@@ -27,14 +27,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== RESOURCES ====================
-# Using Roboto-Medium to match the clean look of the example
-FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Medium.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Roboto-Medium.ttf")
+# Using Roboto-Bold for the "Thick" look
+FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
 def check_resources():
     """Downloads font using standard library."""
     if not os.path.exists(FONT_PATH):
-        logger.info("Downloading font...")
+        logger.info("Downloading bold font...")
         try:
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
             logger.info("Font downloaded successfully.")
@@ -78,10 +78,10 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (Rounded Box Style) ====================
+# ==================== IMAGE PROCESSING (Rounded & Thick) ====================
 def create_watermark(text: str) -> str:
     # 1. Set Font Size 
-    font_size = 42
+    font_size = 46 # Good visible size
     try:
         font = ImageFont.truetype(FONT_PATH, font_size)
     except:
@@ -90,14 +90,18 @@ def create_watermark(text: str) -> str:
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     
-    # Get exact text size
-    bbox = d.textbbox((0, 0), text, font=font)
+    # 2. Thickness Logic (Stroke)
+    stroke = 2 # Makes text "a little bit thick"
+    
+    # Get exact text size with stroke
+    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     
-    # 2. Define Padding and Box Size
-    padding_x = 24  # Horizontal padding
-    padding_y = 12  # Vertical padding
+    # 3. Define Padding and Box Size
+    # Tight but comfortable padding (Instagram style)
+    padding_x = 24  
+    padding_y = 14  
     
     box_width = text_width + (padding_x * 2)
     box_height = text_height + (padding_y * 2)
@@ -105,22 +109,24 @@ def create_watermark(text: str) -> str:
     img = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # 3. Draw Rounded Background
-    # Fill: Semi-transparent black (0, 0, 0, 180) to match image
+    # 4. Draw Rounded Background (Pill Shape)
+    # Fill: Semi-transparent black (0, 0, 0, 180)
     draw.rounded_rectangle(
         (0, 0, box_width, box_height), 
         radius=box_height // 2, # Fully rounded corners
         fill=(0, 0, 0, 180) 
     )
     
-    # 4. Draw Text
-    # Fill: White (255, 255, 255)
+    # 5. Draw Text (Thick/Bold)
+    # Align text in exact center using anchor="mm"
     draw.text(
-        (box_width / 2, box_height / 2),
+        (box_width / 2, box_height / 2 - 2), # -2 for slight visual optical alignment
         text, 
         font=font, 
         fill=(255, 255, 255, 255),
-        anchor="mm" # Centers text
+        anchor="mm",
+        stroke_width=stroke,
+        stroke_fill=(255, 255, 255, 255) # White stroke to thicken
     )
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
@@ -150,25 +156,23 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="static")
     try:
         wm_path = create_watermark(text)
         
-        # Scale video to target resolution first
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
             # ================= STATIC MODE (BOTTOM RIGHT) =================
-            # W = Main Video Width, w = Watermark Width
-            # H = Main Video Height, h = Watermark Height
-            # -25: Padding from the right/bottom edge
-            filter_complex += f"{last_stream}[1:v]overlay=W-w-25:H-h-25"
+            # W-w-25 : 25 pixels from Right edge
+            # H-h-70 : 70 pixels from Bottom edge (to avoid timeline/controls)
+            filter_complex += f"{last_stream}[1:v]overlay=W-w-25:H-h-70"
         
         else:
             # ================= ANIMATED MODE =================
             wm_img = Image.open(wm_path)
             wm_w, wm_h = wm_img.size
             in_w, in_h = await get_video_meta(in_path)
+            
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
-            
             max_x = max(0, scaled_w - wm_w - 5)
             max_y = max(0, scaled_h - wm_h - 5)
 
@@ -185,20 +189,32 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="static")
             
             filter_complex = filter_complex.rstrip(";")
 
-        # Construct Command
         cmd_args = [
             "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_complex,
+            "-map", last_stream if mode == "animated" else filter_complex.split("]")[-1] if "overlay" not in filter_complex else "[bg]", # Fixed map logic below
         ]
-
-        if mode == "animated":
-            cmd_args.extend(["-map", last_stream])
         
-        cmd_args.extend([
+        # Simplified map logic:
+        # If static, the filter output is usually implicit or named. 
+        # But safest is to just map the overlay output.
+        # Let's fix the command construction for safety:
+        
+        cmd_args = [
+            "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
+            "-filter_complex", filter_complex,
             "-map", "0:a?", "-c:v", "libx264", "-preset", "faster",
             "-crf", str(crf), "-c:a", "aac", "-b:a", "192k", 
             "-movflags", "+faststart", out_path
-        ])
+        ]
+
+        # NOTE: FFmpeg automatically picks the last filter output if -map isn't specific about video stream.
+        # For safety in complex filters:
+        if mode == "animated":
+            # In animated loop we named streams, so we must map the last one
+            cmd_args.insert(7, "-map")
+            cmd_args.insert(8, last_stream)
+        # For static, the default chain works fine.
 
         process = await asyncio.create_subprocess_exec(
             *cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -303,7 +319,7 @@ async def set_crf(_, m):
         sess = await get_session(m.from_user.id)
         sess.crf = max(0, min(int(m.command[1]), 51))
         await m.reply(f"✅ CRF: {sess.crf}")
-    except: await m.reply("Usage: /crf 23 (lower is better quality)")
+    except: await m.reply("Usage: /crf 23")
 
 @app.on_message(filters.command("res"))
 async def set_res(_, m):
