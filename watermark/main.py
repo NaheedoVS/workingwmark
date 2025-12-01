@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Huge Text, Tighter Box
+# Async Watermark Bot – Bottom Right + Thick/Huge Text
 
 import os
 import time
@@ -77,33 +77,48 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (HUGE TEXT, TIGHT BOX) ====================
-def create_watermark(text: str, scale=0.85) -> str:
-    # 1. Increased font size to 100 (was 75)
+# ==================== IMAGE PROCESSING (THICK & TIGHT) ====================
+def create_watermark(text: str, scale=0.90) -> str:
+    # 1. Huge Font Size
     try:
-        font = ImageFont.truetype(FONT_PATH, 100)
+        font = ImageFont.truetype(FONT_PATH, 110)
     except:
         font = ImageFont.load_default()
 
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font)
     
-    # 2. Reduced padding for a tighter box
-    # Adding 30 total width (15px each side) and 20 total height (10px top/bottom)
-    # (Was +60 and +40 previously)
-    w, h = bbox[2] - bbox[0] + 30, bbox[3] - bbox[1] + 20
+    # Calculate size with stroke_width (makes it thick)
+    stroke = 4
+    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    
+    # 2. Very Tight Padding
+    # Horizontal: +20px total (10px per side)
+    # Vertical: +20px total (10px per side)
+    w = bbox[2] - bbox[0] + 24
+    h = bbox[3] - bbox[1] + 24
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    # Draw rounded box background
-    draw.rounded_rectangle((0, 0, w, h), radius=15, fill=(0, 0, 0, 160))
     
-    # Draw text centered in the new tighter padding (at coordinates 15, 10)
-    draw.text((15, 10), text, font=font, fill=(255, 255, 255, 240))
+    # Draw Background (Tight Box)
+    draw.rounded_rectangle((0, 0, w, h), radius=12, fill=(0, 0, 0, 160))
+    
+    # Draw Text (White with White Stroke for thickness)
+    # Position: 12, 6 puts it centered in the +24/+24 padding logic
+    # The y-offset usually needs manual tweaking for fonts, using bbox[1] helps align it
+    draw.text(
+        (12, 12 - bbox[1]), # Align based on ascent
+        text, 
+        font=font, 
+        fill=(255, 255, 255, 255),
+        stroke_width=stroke, 
+        stroke_fill=(255, 255, 255, 255) # Same color stroke makes it bold/thick
+    )
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
     
+    # Resize Logic
     final_w, final_h = int(w * scale), int(h * scale)
     img = img.resize((final_w, final_h), Image.Resampling.LANCZOS)
     img.save(wm_path)
@@ -136,17 +151,20 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
         last_stream = "[bg]"
 
         if mode == "static":
-            # Static: Bottom Left with 15px padding
-            filter_complex += f"{last_stream}[1:v]overlay=15:H-h-15"
+            # ================= STATIC MODE (BOTTOM RIGHT) =================
+            # W = Main Video Width, w = Watermark Width
+            # H = Main Video Height, h = Watermark Height
+            # -20: Padding from the edge
+            filter_complex += f"{last_stream}[1:v]overlay=W-w-20:H-h-20"
+        
         else:
-            # Animated: Random pop-up
+            # ================= ANIMATED MODE =================
             wm_img = Image.open(wm_path)
             wm_w, wm_h = wm_img.size
             in_w, in_h = await get_video_meta(in_path)
             
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
-            # Ensure watermark doesn't get stuck if it's too big for the video
             max_x = max(0, scaled_w - wm_w - 5)
             max_y = max(0, scaled_h - wm_h - 5)
 
@@ -253,7 +271,7 @@ async def start_handler(_, m):
     await m.reply(
         "**👋 Watermark Bot**\n\n"
         "1. **/w** - Animated Watermark (Pop-up)\n"
-        "2. **/ws** - Static Watermark (Bottom Left)\n"
+        "2. **/ws** - Static Watermark (Bottom Right)\n"
         "3. **/settings** - Check config\n"
     )
 
@@ -269,7 +287,7 @@ async def set_static(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "static"
-    await m.reply("📍 **Static Mode Selected**\n(Bottom Left)\n\nSend the watermark text:")
+    await m.reply("📍 **Static Mode Selected**\n(Bottom Right)\n\nSend the watermark text:")
 
 @app.on_message(filters.command("settings"))
 async def settings_handler(_, m):
