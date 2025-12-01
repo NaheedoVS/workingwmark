@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Supersampled Quality + Smooth Bouncing
+# Async Watermark Bot – High Quality + Smooth Bounce + Processing Progress Bar
 
 import os
+import re
 import time
 import json
 import asyncio
@@ -64,27 +65,37 @@ async def get_session(uid: int) -> UserSession:
     async with lock:
         return session_manager.setdefault(uid, UserSession(uid))
 
-# ==================== PROGRESS BAR ====================
-async def progress_bar(current, total, status_msg, start_time):
+# ==================== HELPERS ====================
+def time_to_seconds(time_str):
+    """Converts HH:MM:SS.mm to seconds."""
+    try:
+        h, m, s = time_str.split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except:
+        return 0
+
+def render_bar(current, total):
+    """Creates a text progress bar."""
+    if total == 0: return "[░░░░░░░░░░]"
+    pct = int(current * 100 / total)
+    pct = max(0, min(100, pct))
+    filled = pct // 10
+    return f"[{'█' * filled}{'░' * (10 - filled)}] {pct}%"
+
+async def download_progress(current, total, status_msg, start_time):
+    """Callback for Telegram download progress."""
     now = time.time()
     if (now - start_time) < 3 and current < total: 
         return 
-        
-    pct = int(current * 100 / total)
-    bar = "█" * (pct // 10) + "▒" * (10 - (pct // 10))
     try:
-        await status_msg.edit_text(f"**Downloading...**\n[{bar}] {pct}%")
-    except Exception:
+        await status_msg.edit_text(f"⬇️ **Downloading...**\n{render_bar(current, total)}")
+    except:
         pass
 
 # ==================== HIGH QUALITY IMAGE GENERATION ====================
 def create_watermark(text: str, target_video_height: int) -> str:
-    # === SUPERSAMPLING FACTOR ===
-    # We draw everything 3x larger than needed, then shrink it down.
-    # This eliminates pixelation/blurriness.
+    # Supersampling Factor (3x)
     scale_factor = 3
-    
-    # Base font size logic (approx 5% of video height) * scale_factor
     base_font_size = int((target_video_height // 20) * scale_factor)
     
     try:
@@ -92,7 +103,7 @@ def create_watermark(text: str, target_video_height: int) -> str:
     except:
         font = ImageFont.load_default()
 
-    # 1. Create Text Layer
+    # 1. Text Layer
     dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
     bbox = dummy_draw.textbbox((0, 0), text, font=font, stroke_width=0)
     w_raw = bbox[2] - bbox[0]
@@ -100,51 +111,34 @@ def create_watermark(text: str, target_video_height: int) -> str:
 
     text_img = Image.new("RGBA", (w_raw, h_raw + (20 * scale_factor)), (0,0,0,0))
     d_text = ImageDraw.Draw(text_img)
-    # White Text, No Stroke (Clean)
     d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
     
-    # Crop to content
-    text_bbox = text_img.getbbox()
-    if text_bbox:
-        text_img = text_img.crop(text_bbox)
+    if text_img.getbbox():
+        text_img = text_img.crop(text_img.getbbox())
 
-    # 2. Apply Aspect Ratio Distortion (Width 2x, Height 1.5x)
-    # We do this at the high resolution
+    # 2. Distortion (Width 2x, Height 1.5x)
     cur_w, cur_h = text_img.size
     distort_w = int(cur_w * 2.0)
     distort_h = int(cur_h * 1.5)
-    
     text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
 
-    # 3. Create Background Box (High Res)
-    # TIGHT padding calculation
+    # 3. Background Box
     padding_x = int(base_font_size * 0.4) 
     padding_y = int(base_font_size * 0.2)
-    
     box_w = distort_w + (padding_x * 2)
     box_h = distort_h + (padding_y * 2)
 
     bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(bg_img)
+    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 2, fill=(0, 0, 0, 180))
     
-    # Draw Rounded Box
-    draw.rounded_rectangle(
-        (0, 0, box_w, box_h), 
-        radius=box_h // 2, 
-        fill=(0, 0, 0, 180) 
-    )
-    
-    # Paste Text Center
     px = (box_w - distort_w) // 2
     py = (box_h - distort_h) // 2
     bg_img.paste(text_img, (px, py), text_img)
 
-    # 4. FINAL DOWNSCALE (The Magic Step)
-    # Resize back down to the target size using LANCZOS.
-    # This smooths out all jagged edges.
+    # 4. Final Downscale
     final_w = int(box_w / scale_factor)
     final_h = int(box_h / scale_factor)
-    
     final_img = bg_img.resize((final_w, final_h), Image.Resampling.LANCZOS)
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
@@ -152,58 +146,100 @@ def create_watermark(text: str, target_video_height: int) -> str:
     return wm_path
 
 # ==================== VIDEO PROCESSING ====================
-async def process_video(in_path, text, out_path, crf, resolution, mode="static"):
+async def get_video_info(path):
+    """Returns width, height, duration."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,duration",
+        "-of", "json", path
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await process.communicate()
+    try:
+        meta = json.loads(stdout)
+        stream = meta["streams"][0]
+        return (
+            int(stream.get("width", 0)), 
+            int(stream.get("height", 0)), 
+            float(stream.get("duration", 0))
+        )
+    except:
+        return 0, 0, 0
+
+async def process_video(in_path, text, out_path, crf, resolution, status_msg, mode="static"):
     wm_path = None
     try:
-        # Generate High-Res watermark based on output resolution
+        # Get Video Details
+        in_w, in_h, duration = await get_video_info(in_path)
+        if duration == 0: duration = 1 # Prevent division by zero
+
+        # Generate Watermark
         wm_path = create_watermark(text, resolution)
         
-        # Scale video
+        # Filters
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
-            # ================= STATIC (Bottom Right) =================
             margin = int(resolution * 0.035)
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
-        
         else:
-            # ================= ANIMATED (Smooth Bounce) =================
-            # We use modulus math to make it bounce off the walls seamlessly.
-            # No intervals, no flickering, just one continuous layer.
-            
-            # Speed of movement (Pixels per second)
-            speed_x = resolution // 15 # Move width in ~15 seconds
-            speed_y = resolution // 20 # Move height in ~20 seconds
-
-            # Formula: pos = abs(mod(t * speed, 2 * (max_space)) - max_space)
-            # This creates a triangle wave (bounce effect) 0 -> max -> 0
-            
+            speed_x = resolution // 15
+            speed_y = resolution // 20
             x_expr = f"abs(mod(t*{speed_x}, 2*(W-w)) - (W-w))"
             y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
-
             filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
 
-        # === FFmpeg Command ===
+        # FFmpeg Command
         cmd_args = [
-            "ffmpeg", "-y", 
-            "-i", in_path, 
-            "-i", wm_path,
+            "ffmpeg", "-y", "-i", in_path, "-i", wm_path,
             "-filter_complex", filter_complex,
-            "-map", "0:a?", # Map audio if exists
-            "-c:v", "libx264", 
-            "-preset", "faster", # Balance between speed and quality
-            "-crf", str(crf), 
-            "-c:a", "aac", "-b:a", "192k", 
-            "-movflags", "+faststart", 
-            out_path
+            "-map", "0:a?", "-c:v", "libx264", "-preset", "faster",
+            "-crf", str(crf), "-c:a", "aac", "-b:a", "192k", 
+            "-movflags", "+faststart", out_path
         ]
 
+        # Start FFmpeg
         process = await asyncio.create_subprocess_exec(
-            *cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd_args, 
+            stdout=asyncio.subprocess.PIPE, 
+            stderr=asyncio.subprocess.PIPE
         )
-        await process.communicate()
 
+        # === PROCESSING PROGRESS LOOP ===
+        last_update_time = time.time()
+        
+        while True:
+            # Read stderr line by line (where ffmpeg sends progress)
+            line = await process.stderr.readline()
+            if not line:
+                break
+            
+            line_str = line.decode('utf-8', errors='ignore')
+            
+            # Find "time=00:00:05.12" pattern
+            if "time=" in line_str:
+                time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line_str)
+                if time_match:
+                    current_time_str = time_match.group(1)
+                    current_seconds = time_to_seconds(current_time_str)
+                    
+                    # Update Telegram every 4 seconds to avoid FloodWait
+                    if time.time() - last_update_time > 4:
+                        bar = render_bar(current_seconds, duration)
+                        try:
+                            await status_msg.edit_text(
+                                f"⚙️ **Processing...**\n{bar}\n\n"
+                                f"Mode: {mode.title()} | CRF: {crf}"
+                            )
+                        except:
+                            pass
+                        last_update_time = time.time()
+
+        await process.wait()
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
 
     except Exception as e:
@@ -236,12 +272,17 @@ async def worker(uid):
         while sess.queue:
             in_path, text, _ = sess.queue.pop(0)
             out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}.mp4")
-            status_msg = await app.send_message(uid, f"⏳ **Processing ({sess.watermark_mode})...**")
+            
+            # Initial Status
+            status_msg = await app.send_message(uid, f"⏳ **Starting FFmpeg...**")
 
             start_t = time.time()
+            
+            # Pass status_msg to process_video for updates
             success = await process_video(
                 in_path, text, out_path, 
                 sess.crf, sess.resolution, 
+                status_msg, # <--- Passed here
                 mode=sess.watermark_mode
             )
             
@@ -250,15 +291,22 @@ async def worker(uid):
                 thumb = await generate_thumbnail(out_path)
                 caption = (
                     f"✅ **Done ({sess.watermark_mode.title()})**\n"
-                    f"⏱ Time: {dur}s | CRF: {sess.crf} | Res: {sess.resolution}p\n"
+                    f"⏱ Total Time: {dur}s | CRF: {sess.crf}\n"
                     f"📝 `{text}`"
                 )
-                await status_msg.edit_text("📤 **Uploading...**")
-                await app.send_video(uid, out_path, caption=caption, thumb=thumb, supports_streaming=True)
+                await status_msg.edit_text(f"📤 **Uploading...**\n{render_bar(0, 100)}")
+                
+                # Upload with progress
+                start_up = time.time()
+                await app.send_video(
+                    uid, out_path, caption=caption, thumb=thumb, supports_streaming=True,
+                    progress=download_progress, progress_args=(status_msg, start_up)
+                )
                 if thumb: os.remove(thumb)
             else:
                 await status_msg.edit_text("❌ Processing Failed.")
 
+            await status_msg.delete()
             if os.path.exists(in_path): os.remove(in_path)
             if os.path.exists(out_path): os.remove(out_path)
             
@@ -271,9 +319,9 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot (High Quality + Smooth Bounce)**\n\n"
+        "**👋 Watermark Bot v3.0**\n\n"
         "1. **/ws** - Static Watermark (Bottom Right)\n"
-        "2. **/w** - Animated Watermark (Smooth Moving)\n"
+        "2. **/w** - Animated Watermark (Smooth Bounce)\n"
         "3. **/settings** - Check config\n"
     )
 
@@ -333,7 +381,7 @@ async def media_handler(c, m):
     status = await m.reply("⬇️ **Downloading...**")
     path = await c.download_media(
         file, file_name=os.path.join(WORK_DIR, f"in_{m.from_user.id}_{int(time.time())}.mp4"),
-        progress=progress_bar, progress_args=(status, time.time())
+        progress=download_progress, progress_args=(status, time.time())
     )
     if path:
         sess.queue.append((path, sess.watermark_text, "video"))
