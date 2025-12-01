@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Bottom Right + Thick/Huge Text
+# Async Watermark Bot – Rounded Box Style + Bottom Right Position
 
 import os
 import time
@@ -27,13 +27,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== RESOURCES ====================
-FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
+# Using Roboto-Medium to match the clean look of the example
+FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Medium.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Roboto-Medium.ttf")
 
 def check_resources():
     """Downloads font using standard library."""
     if not os.path.exists(FONT_PATH):
-        logger.info("Downloading bold font...")
+        logger.info("Downloading font...")
         try:
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
             logger.info("Font downloaded successfully.")
@@ -46,7 +47,7 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
-    watermark_mode: str = "animated"
+    watermark_mode: str = "static" 
     queue: List[Tuple[str, str, str]] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 23
@@ -77,50 +78,52 @@ async def progress_bar(current, total, status_msg, start_time):
     except Exception:
         pass
 
-# ==================== IMAGE PROCESSING (THICK & TIGHT) ====================
-def create_watermark(text: str, scale=0.90) -> str:
-    # 1. Huge Font Size
+# ==================== IMAGE PROCESSING (Rounded Box Style) ====================
+def create_watermark(text: str) -> str:
+    # 1. Set Font Size 
+    font_size = 42
     try:
-        font = ImageFont.truetype(FONT_PATH, 110)
+        font = ImageFont.truetype(FONT_PATH, font_size)
     except:
         font = ImageFont.load_default()
 
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     
-    # Calculate size with stroke_width (makes it thick)
-    stroke = 4
-    bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    # Get exact text size
+    bbox = d.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
     
-    # 2. Very Tight Padding
-    # Horizontal: +20px total (10px per side)
-    # Vertical: +20px total (10px per side)
-    w = bbox[2] - bbox[0] + 24
-    h = bbox[3] - bbox[1] + 24
+    # 2. Define Padding and Box Size
+    padding_x = 24  # Horizontal padding
+    padding_y = 12  # Vertical padding
+    
+    box_width = text_width + (padding_x * 2)
+    box_height = text_height + (padding_y * 2)
 
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    img = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    # Draw Background (Tight Box)
-    draw.rounded_rectangle((0, 0, w, h), radius=12, fill=(0, 0, 0, 160))
+    # 3. Draw Rounded Background
+    # Fill: Semi-transparent black (0, 0, 0, 180) to match image
+    draw.rounded_rectangle(
+        (0, 0, box_width, box_height), 
+        radius=box_height // 2, # Fully rounded corners
+        fill=(0, 0, 0, 180) 
+    )
     
-    # Draw Text (White with White Stroke for thickness)
-    # Position: 12, 6 puts it centered in the +24/+24 padding logic
-    # The y-offset usually needs manual tweaking for fonts, using bbox[1] helps align it
+    # 4. Draw Text
+    # Fill: White (255, 255, 255)
     draw.text(
-        (12, 12 - bbox[1]), # Align based on ascent
+        (box_width / 2, box_height / 2),
         text, 
         font=font, 
         fill=(255, 255, 255, 255),
-        stroke_width=stroke, 
-        stroke_fill=(255, 255, 255, 255) # Same color stroke makes it bold/thick
+        anchor="mm" # Centers text
     )
 
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
-    
-    # Resize Logic
-    final_w, final_h = int(w * scale), int(h * scale)
-    img = img.resize((final_w, final_h), Image.Resampling.LANCZOS)
     img.save(wm_path)
     return wm_path
 
@@ -142,11 +145,12 @@ async def get_video_meta(path):
     except:
         return 0, 0
 
-async def process_video(in_path, text, out_path, crf, resolution, mode="animated"):
+async def process_video(in_path, text, out_path, crf, resolution, mode="static"):
     wm_path = None
     try:
         wm_path = create_watermark(text)
         
+        # Scale video to target resolution first
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
@@ -154,17 +158,17 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
             # ================= STATIC MODE (BOTTOM RIGHT) =================
             # W = Main Video Width, w = Watermark Width
             # H = Main Video Height, h = Watermark Height
-            # -20: Padding from the edge
-            filter_complex += f"{last_stream}[1:v]overlay=W-w-20:H-h-20"
+            # -25: Padding from the right/bottom edge
+            filter_complex += f"{last_stream}[1:v]overlay=W-w-25:H-h-25"
         
         else:
             # ================= ANIMATED MODE =================
             wm_img = Image.open(wm_path)
             wm_w, wm_h = wm_img.size
             in_w, in_h = await get_video_meta(in_path)
-            
             scaled_w = int(in_w * (resolution / in_h))
             scaled_h = resolution
+            
             max_x = max(0, scaled_w - wm_w - 5)
             max_y = max(0, scaled_h - wm_h - 5)
 
@@ -191,8 +195,8 @@ async def process_video(in_path, text, out_path, crf, resolution, mode="animated
             cmd_args.extend(["-map", last_stream])
         
         cmd_args.extend([
-            "-map", "0:a?", "-c:v", "libx264", "-preset", "superfast",
-            "-crf", str(crf), "-c:a", "aac", "-b:a", "128k", 
+            "-map", "0:a?", "-c:v", "libx264", "-preset", "faster",
+            "-crf", str(crf), "-c:a", "aac", "-b:a", "192k", 
             "-movflags", "+faststart", out_path
         ])
 
@@ -254,9 +258,8 @@ async def worker(uid):
                 await app.send_video(uid, out_path, caption=caption, thumb=thumb, supports_streaming=True)
                 if thumb: os.remove(thumb)
             else:
-                await app.send_message(uid, "❌ Processing Failed.")
+                await status_msg.edit_text("❌ Processing Failed.")
 
-            await status_msg.delete()
             if os.path.exists(in_path): os.remove(in_path)
             if os.path.exists(out_path): os.remove(out_path)
             
@@ -269,9 +272,9 @@ app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOK
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     await m.reply(
-        "**👋 Watermark Bot**\n\n"
-        "1. **/w** - Animated Watermark (Pop-up)\n"
-        "2. **/ws** - Static Watermark (Bottom Right)\n"
+        "**👋 Watermark Bot (Rounded Style)**\n\n"
+        "1. **/ws** - Static Watermark (Bottom Right)\n"
+        "2. **/w** - Animated Watermark (Pop-up)\n"
         "3. **/settings** - Check config\n"
     )
 
@@ -287,7 +290,7 @@ async def set_static(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "static"
-    await m.reply("📍 **Static Mode Selected**\n(Bottom Right)\n\nSend the watermark text:")
+    await m.reply("📍 **Static Mode Selected**\n(Bottom Right Rounded Box)\n\nSend the watermark text:")
 
 @app.on_message(filters.command("settings"))
 async def settings_handler(_, m):
@@ -300,7 +303,7 @@ async def set_crf(_, m):
         sess = await get_session(m.from_user.id)
         sess.crf = max(0, min(int(m.command[1]), 51))
         await m.reply(f"✅ CRF: {sess.crf}")
-    except: await m.reply("Usage: /crf 23")
+    except: await m.reply("Usage: /crf 23 (lower is better quality)")
 
 @app.on_message(filters.command("res"))
 async def set_res(_, m):
@@ -322,14 +325,15 @@ async def text_handler(_, m):
 async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
     if sess.step != "waiting_media":
-        return await m.reply("⚠️ Use /w or /ws first.")
+        return await m.reply("⚠️ Use /ws or /w first.")
     
+    file = m.video or m.document
     if m.document and "video" not in m.document.mime_type:
         return await m.reply("❌ Not a video.")
 
     status = await m.reply("⬇️ **Downloading...**")
     path = await c.download_media(
-        m, file_name=os.path.join(WORK_DIR, f"in_{m.from_user.id}_{int(time.time())}.mp4"),
+        file, file_name=os.path.join(WORK_DIR, f"in_{m.from_user.id}_{int(time.time())}.mp4"),
         progress=progress_bar, progress_args=(status, time.time())
     )
     if path:
