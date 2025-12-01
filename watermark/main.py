@@ -120,19 +120,22 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             y_expr += f"if(eq({index_expr},{i}),{positions[i][1]},"
         y_expr += "0" + ")" * POSITIONS
 
-        # fade in/out inside each 10-second block (using single backslash for mod(t\,10) escape)
-        # fade in/out inside each 10-second block. Escaping both commas now.
-        # Python string: "min(A\\, B)" -> Shell command: min(A\, B)
-        fade_expr = "min(mod(t\\,10)/1\\, (10-mod(t\\,10))/1)"
+        # CRITICAL FIX: Enhanced escaping for the MIN function's comma (outer comma).
+        # We use a quadruple backslash (\\\\,) in the Python string to ensure 
+        # the comma is correctly interpreted by the FFmpeg expression evaluator.
+        fade_expr = "min(mod(t\\,10)/1\\\\, (10-mod(t\\,10))/1)"
 
         # ============================================
-        # FIXED OVERLAY: Using 'alpha' parameter in overlay filter (Fix for Invalid argument error)
+        # SINGLE FILTER_COMPLEX: Includes scaling and overlay
+        # The '-vf scale' option is removed from the main command list.
         # ============================================
-        # Removed colorchannelmixer. Using [0:v] (video) and [1:v] (watermark) directly
         overlay_filter = (
-            f"[0:v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
-            f"alpha='{fade_expr}':" # Apply fade expression to the overlay's alpha
-            f"format=auto[v]"
+            # 1. Scale the input video [0:v] to the target resolution [main_v]
+            f"[0:v]scale=-2:'min(ih,{resolution})'[main_v];" 
+            # 2. Overlay the watermark [1:v] onto the scaled video [main_v]
+            f"[main_v][1:v]overlay=x='{x_expr}':y='{y_expr}':" 
+            f"alpha='{fade_expr}'" # Apply the dynamically escaped fade expression
+            f"[v]" # Output is labeled [v]
         )
 
         # ============================================
@@ -151,7 +154,6 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
             "-c:a", "aac",
             "-b:a", "192k",
             "-movflags", "+faststart",
-            "-vf", f"scale=-2:'min(ih,{resolution})'", # Add resolution scaling filter
             out_path
         ]
 
@@ -162,7 +164,6 @@ def process_video(in_path, text, out_path, crf=21, resolution=720):
 
         os.remove(wm_path)
 
-        # Check for success and minimum output size
         return result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 200000
 
     except Exception as e:
@@ -180,7 +181,7 @@ def get_duration(path):
 
 def make_thumb(path):
     t=f"/tmp/thumb_{int(time.time())}.jpg"
-    # Added aspect ratio correction for thumbnail scaling
+    # Added scale to avoid stretching or huge thumbs
     subprocess.run(["ffmpeg","-y","-i",path,"-ss","10","-vframes","1","-vf","scale='min(640,iw)':-2",t],
                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
     return t if os.path.exists(t) else None
