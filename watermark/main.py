@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – STRICT SEQUENTIAL (Download -> Process -> Upload -> Next)
+# Async Watermark Bot – Fixed FloodWait + Strict Queue + Codec Select
 
 import os
 import re
@@ -80,7 +80,6 @@ class UserSession:
     step: str = "idle"
     watermark_text: str = ""
     watermark_mode: str = "static" 
-    # CHANGED: Queue now stores the Message object, not the file path
     queue: List[Message] = field(default_factory=list)
     is_processing: bool = False
     crf: int = 23
@@ -112,12 +111,19 @@ def render_bar(current, total):
     filled = pct // 10
     return f"[{'█' * filled}{'░' * (10 - filled)}] {pct}%"
 
-async def download_progress(current, total, status_msg, start_time):
+# --- FIXED: DOWNLOAD PROGRESS WITH ANTI-FLOOD ---
+async def download_progress(current, total, status_msg, start_time, last_update_ref):
     now = time.time()
-    if (now - start_time) < 3 and current < total: return 
+    
+    # Wait 5 seconds between updates to avoid 420 FLOOD_WAIT
+    if (now - last_update_ref[0]) < 5 and current < total:
+        return 
+    
+    last_update_ref[0] = now
+    
     try:
         await status_msg.edit_text(f"⬇️ **Downloading...**\n{render_bar(current, total)}")
-    except: pass
+    except Exception: pass
 
 # ==================== WATERMARK LOGIC ====================
 def create_watermark(text: str, target_video_height: int) -> str:
@@ -216,7 +222,8 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
             if "time=" in chunk_str:
                 time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", chunk_str)
                 if time_match:
-                    if time.time() - last_update_time > 4:
+                    # Increased to 5 seconds to be safe against FloodWait
+                    if time.time() - last_update_time > 5:
                         try:
                             codec_name = "HEVC" if codec == "libx265" else "AVC"
                             await status_msg.edit_text(f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
@@ -245,25 +252,24 @@ async def worker(uid):
     
     try:
         while sess.queue:
-            # 1. Get the next MESSAGE from the queue (we haven't downloaded it yet)
             message_to_process = sess.queue.pop(0)
             
-            # 2. Extract info
             file = message_to_process.video or message_to_process.document
             original_caption = message_to_process.caption.html if message_to_process.caption else ""
             original_name = file.file_name if file.file_name else "video.mp4"
             
-            # 3. NOW we download
             status_msg = await app.send_message(uid, f"⬇️ **Downloading next video...**")
             dl_path = os.path.join(WORK_DIR, f"in_{uid}_{int(time.time())}.mp4")
             
             try:
-                # Download logic inside the worker loop
+                # --- FIXED: USING MUTABLE LIST FOR TIME TRACKING ---
+                last_update_time = [0]
+
                 in_path = await app.download_media(
                     message_to_process, 
                     file_name=dl_path, 
                     progress=download_progress, 
-                    progress_args=(status_msg, time.time())
+                    progress_args=(status_msg, time.time(), last_update_time) 
                 )
                 
                 if not in_path:
@@ -272,7 +278,6 @@ async def worker(uid):
 
                 out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
                 
-                # 4. Process
                 await status_msg.edit(f"⏳ **Starting FFmpeg...**")
                 
                 success = await process_video(
@@ -315,7 +320,6 @@ async def worker(uid):
                 
                 await status_msg.delete()
                 
-                # 5. Cleanup THIS video before starting the next loop
                 if os.path.exists(in_path): os.remove(in_path)
                 if os.path.exists(out_path): os.remove(out_path)
 
@@ -361,7 +365,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v5.0 (Strict Queue)**\n"
+        "**👋 Watermark Bot v5.1 (Fix FloodWait)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /codec 264 - Fast Mode\n"
@@ -462,7 +466,6 @@ async def text_handler(_, m):
         sess.step = "waiting_media"
         await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
 
-# --- CHANGED: MEDIA HANDLER JUST ADDS TO QUEUE ---
 @app.on_message((filters.video | filters.document) & filters.private & authorized_only)
 async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
@@ -470,17 +473,14 @@ async def media_handler(c, m):
     
     if m.document and "video" not in m.document.mime_type: return await m.reply("❌ Not a video.")
 
-    # Just Add Message Object to Queue
     sess.queue.append(m)
     
-    # Notify user it is in queue
     position = len(sess.queue)
     if position == 1 and not sess.is_processing:
         await m.reply("✅ **Added to Queue** (Starting now...)")
     else:
         await m.reply(f"✅ **Added to Queue** (Position: {position})")
         
-    # Trigger Worker
     asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
