@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Size h/12 + Auth + Duration + Custom Thumbnail + HEVC Compression
+# Async Watermark Bot – Size h/12 + Auth + Duration + Custom Thumbnail + HEVC + Stable FFmpeg Reading
 
 import os
 import re
@@ -183,7 +183,6 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
             y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
             filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
         
-        # --- SMART COMPRESSION LOGIC (HEVC) ---
         # Adjust CRF for HEVC: Adding +4 roughly matches x264 quality but at lower file size
         hevc_crf = int(crf) + 4
         
@@ -201,16 +200,23 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
         process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         last_update_time = time.time()
         
+        # --- FIXED READ LOOP ---
+        # Using read(4096) instead of readline() to prevent "Separator is not found" crashes on large metadata
         while True:
-            line = await process.stderr.readline()
-            if not line: break
-            line_str = line.decode('utf-8', errors='ignore')
-            if "time=" in line_str:
-                time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line_str)
+            chunk = await process.stderr.read(4096)
+            if not chunk: break
+            
+            chunk_str = chunk.decode('utf-8', errors='ignore')
+            
+            if "time=" in chunk_str:
+                time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", chunk_str)
                 if time_match:
                     if time.time() - last_update_time > 4:
-                        await status_msg.edit_text(f"⚙️ **Processing (HEVC)...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
-                        last_update_time = time.time()
+                        try:
+                            await status_msg.edit_text(f"⚙️ **Processing (HEVC)...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
+                            last_update_time = time.time()
+                        except: pass
+        
         await process.wait()
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
     except Exception as e:
@@ -239,7 +245,6 @@ async def worker(uid):
             out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
             
             status_msg = await app.send_message(uid, f"⏳ **Starting FFmpeg...**")
-            start_t = time.time()
             
             success = await process_video(in_path, text, out_path, sess.crf, sess.resolution, status_msg, mode=sess.watermark_mode)
             
@@ -318,7 +323,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v4.3 (HEVC)**\n"
+        "**👋 Watermark Bot v4.4 (Stable)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /setthumb - Set custom thumbnail\n"
@@ -415,7 +420,7 @@ async def media_handler(c, m):
 
     status = await m.reply("⬇️ **Downloading...**")
     
-    # --- FIX: ADDED MESSAGE ID TO FILENAME ---
+    # --- SAFE FILE NAMING ---
     dl_path = os.path.join(WORK_DIR, f"in_{m.from_user.id}_{m.id}_{int(time.time())}.mp4")
     
     path = await c.download_media(file, file_name=dl_path, progress=download_progress, progress_args=(status, time.time()))
