@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Fixed FloodWait + Strict Queue + Codec Select
+# Async Watermark Bot – 2 Min Interval + Flood Safety + Strict Queue
 
 import os
 import re
@@ -14,6 +14,7 @@ from typing import List, Set
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait, MessageNotModified
 
 # ==================== CONFIG ====================
 API_ID = int(os.environ.get("API_ID", "0")) 
@@ -22,6 +23,9 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 WORK_DIR = "downloads"
 AUTH_FILE = "auth_users.json"
+
+# === TUNING ===
+UPDATE_INTERVAL = 120  # Updates progress every 2 minutes
 
 FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan"
 
@@ -111,19 +115,37 @@ def render_bar(current, total):
     filled = pct // 10
     return f"[{'█' * filled}{'░' * (10 - filled)}] {pct}%"
 
-# --- FIXED: DOWNLOAD PROGRESS WITH ANTI-FLOOD ---
-async def download_progress(current, total, status_msg, start_time, last_update_ref):
+# ==================== SAFE EDIT (FLOOD PROTECTION) ====================
+async def safe_edit(msg, text, timer_ref):
     now = time.time()
     
-    # Wait 5 seconds between updates to avoid 420 FLOOD_WAIT
-    if (now - last_update_ref[0]) < 5 and current < total:
+    # Check 1: Time Interval (2 minutes)
+    if (now - timer_ref[0]) < UPDATE_INTERVAL:
         return 
-    
-    last_update_ref[0] = now
-    
+
     try:
-        await status_msg.edit_text(f"⬇️ **Downloading...**\n{render_bar(current, total)}")
-    except Exception: pass
+        await msg.edit_text(text)
+        timer_ref[0] = now
+    except FloodWait as e:
+        logger.warning(f"FloodWait hit! Sleeping updates for {e.value}s")
+        # Fake the timer so we don't try again for the duration of the ban
+        timer_ref[0] = now + e.value + 10
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.error(f"Edit failed: {e}")
+
+# ==================== DOWNLOAD PROGRESS ====================
+async def download_progress(current, total, status_msg, start_time, last_update_ref):
+    # Only update if finished or interval passed
+    if current == total:
+        # Force update on completion
+        pass
+    elif (time.time() - last_update_ref[0]) < UPDATE_INTERVAL:
+        return
+
+    text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
+    await safe_edit(status_msg, text, last_update_ref)
 
 # ==================== WATERMARK LOGIC ====================
 def create_watermark(text: str, target_video_height: int) -> str:
@@ -211,7 +233,9 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
         cmd_args.append(out_path)
 
         process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        last_update_time = time.time()
+        
+        # Safe Timer List
+        last_update_time = [0]
         
         while True:
             chunk = await process.stderr.read(4096)
@@ -222,13 +246,10 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
             if "time=" in chunk_str:
                 time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", chunk_str)
                 if time_match:
-                    # Increased to 5 seconds to be safe against FloodWait
-                    if time.time() - last_update_time > 5:
-                        try:
-                            codec_name = "HEVC" if codec == "libx265" else "AVC"
-                            await status_msg.edit_text(f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
-                            last_update_time = time.time()
-                        except: pass
+                    # Pass through Safety Valve with 2 Min Interval
+                    codec_name = "HEVC" if codec == "libx265" else "AVC"
+                    text = f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}"
+                    await safe_edit(status_msg, text, last_update_time)
         
         await process.wait()
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
@@ -262,7 +283,7 @@ async def worker(uid):
             dl_path = os.path.join(WORK_DIR, f"in_{uid}_{int(time.time())}.mp4")
             
             try:
-                # --- FIXED: USING MUTABLE LIST FOR TIME TRACKING ---
+                # Timer ref for Download
                 last_update_time = [0]
 
                 in_path = await app.download_media(
@@ -298,7 +319,9 @@ async def worker(uid):
                         thumb = await generate_thumbnail(out_path)
                         is_custom_thumb = False
 
-                    await status_msg.edit_text(f"📤 **Uploading...**\n{render_bar(0, 100)}")
+                    # Final 'Uploading' message doesn't need constant updates, 
+                    # we just set it once to avoid issues at the end.
+                    await status_msg.edit_text(f"📤 **Uploading...**")
                     
                     name_root, ext = os.path.splitext(original_name)
                     final_filename = f"{name_root}{FILENAME_SUFFIX}{ext}"
@@ -365,7 +388,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v5.1 (Fix FloodWait)**\n"
+        "**👋 Watermark Bot v5.2 (Safety Mode)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /codec 264 - Fast Mode\n"
