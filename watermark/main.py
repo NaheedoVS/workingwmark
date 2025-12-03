@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Size h/12 + Auth + Duration + Custom Thumbnail + HEVC + Stable FFmpeg Reading
+# Async Watermark Bot – Final Version: Codec Select + h/12 Size + Startup Msg
 
 import os
 import re
@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Tuple, Set
 from PIL import Image, ImageDraw, ImageFont
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 
 # ==================== CONFIG ====================
@@ -85,6 +85,7 @@ class UserSession:
     crf: int = 23
     resolution: int = 720
     custom_thumb_path: str = None 
+    codec: str = "libx265"  # Defaulting to HEVC as per your preference
 
     def reset(self):
         self.step = "waiting_text"
@@ -120,6 +121,8 @@ async def download_progress(current, total, status_msg, start_time):
 # ==================== WATERMARK LOGIC ====================
 def create_watermark(text: str, target_video_height: int) -> str:
     scale_factor = 3
+    
+    # --- CHANGE: STRICT h/12 SIZE ---
     base_font_size = int((target_video_height // 12) * scale_factor)
     font = get_font(base_font_size)
 
@@ -164,7 +167,7 @@ async def get_video_info(path):
         return int(stream.get("width", 0)), int(stream.get("height", 0)), float(stream.get("duration", 0))
     except: return 0, 0, 0
 
-async def process_video(in_path, text, out_path, crf, resolution, status_msg, mode="static"):
+async def process_video(in_path, text, out_path, crf, resolution, codec, status_msg, mode="static"):
     wm_path = None
     try:
         in_w, in_h, duration = await get_video_info(in_path)
@@ -183,25 +186,33 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
             y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
             filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
         
-        # Adjust CRF for HEVC: Adding +4 roughly matches x264 quality but at lower file size
-        hevc_crf = int(crf) + 4
-        
+        # --- CHANGE: DYNAMIC CODEC LOGIC ---
         cmd_args = [
             "ffmpeg", "-y", "-i", in_path, "-i", wm_path, "-filter_complex", filter_complex,
             "-map", "0:a?", 
-            "-c:v", "libx265",          # Use HEVC (Stronger Compression)
-            "-preset", "fast",          # Balance speed/size for Heroku
-            "-crf", str(hevc_crf),      # Optimized CRF
-            "-tag:v", "hvc1",           # Apple/iOS Compatibility
-            "-c:a", "aac", "-b:a", "128k", # Optimized Audio (128k is sufficient)
-            "-movflags", "+faststart", out_path
+            "-c:v", codec,             # Using the user-selected codec
+            "-preset", "fast",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart"
         ]
+
+        # Apply specific settings based on the codec
+        if codec == "libx265":
+            # HEVC: Add slight CRF offset and Apple tag
+            hevc_crf = int(crf) + 4
+            cmd_args.extend(["-crf", str(hevc_crf)])
+            cmd_args.extend(["-tag:v", "hvc1"]) 
+        else:
+            # AVC: Standard settings and pixel format
+            cmd_args.extend(["-crf", str(crf)])
+            cmd_args.extend(["-pix_fmt", "yuv420p"]) 
+
+        cmd_args.append(out_path)
+        # -----------------------------------
 
         process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         last_update_time = time.time()
         
-        # --- FIXED READ LOOP ---
-        # Using read(4096) instead of readline() to prevent "Separator is not found" crashes on large metadata
         while True:
             chunk = await process.stderr.read(4096)
             if not chunk: break
@@ -213,7 +224,9 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
                 if time_match:
                     if time.time() - last_update_time > 4:
                         try:
-                            await status_msg.edit_text(f"⚙️ **Processing (HEVC)...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
+                            # Display current codec in status
+                            codec_name = "HEVC" if codec == "libx265" else "AVC"
+                            await status_msg.edit_text(f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
                             last_update_time = time.time()
                         except: pass
         
@@ -238,20 +251,21 @@ async def worker(uid):
     sess.is_processing = True
     try:
         while sess.queue:
-            # We unpack 5 items now because we stored the message_id to prevent collision
             in_path, text, original_caption, original_name = sess.queue.pop(0)
             
-            # Output name also gets a random component to be safe
             out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
             
             status_msg = await app.send_message(uid, f"⏳ **Starting FFmpeg...**")
             
-            success = await process_video(in_path, text, out_path, sess.crf, sess.resolution, status_msg, mode=sess.watermark_mode)
+            # Pass the session codec to the processor
+            success = await process_video(
+                in_path, text, out_path, sess.crf, sess.resolution, 
+                sess.codec, status_msg, mode=sess.watermark_mode
+            )
             
             if success:
                 _, _, out_duration = await get_video_info(out_path)
                 
-                # --- THUMBNAIL LOGIC ---
                 thumb = None
                 is_custom_thumb = False
                 
@@ -289,7 +303,6 @@ async def worker(uid):
 # ==================== HANDLERS ====================
 app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- Admin Commands ---
 @app.on_message(filters.command("auth") & filters.user(OWNER_ID))
 async def auth_handler(_, m):
     if len(m.command) != 2: return await m.reply("Usage: `/auth 123456789`")
@@ -317,18 +330,17 @@ async def unauth_handler(_, m):
 async def list_users(_, m):
     await m.reply(f"**Authorized Users:**\n" + "\n".join([f"`{uid}`" for uid in AUTHORIZED_USERS]))
 
-# --- Public/Auth Handlers ---
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v4.4 (Stable)**\n"
+        "**👋 Watermark Bot v4.5**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
-        "3. /setthumb - Set custom thumbnail\n"
-        "4. /clearthumb - Delete custom thumbnail\n"
-        "5. /viewthumb - View current thumbnail"
+        "3. /codec 264 - Fast Mode\n"
+        "4. /codec 265 - High Compress Mode\n"
+        "5. /settings - Check current settings"
     )
 
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
@@ -345,7 +357,7 @@ async def set_thumb_handler(c, m):
         os.remove(sess.custom_thumb_path)
     path = await c.download_media(photo, file_name=os.path.join(WORK_DIR, f"thumb_{m.from_user.id}.jpg"))
     sess.custom_thumb_path = path
-    await m.reply("✅ **Custom Thumbnail Saved!**\nIt will be used for all future videos.")
+    await m.reply("✅ **Custom Thumbnail Saved!**")
 
 @app.on_message(filters.command("clearthumb") & authorized_only)
 async def clear_thumb_handler(_, m):
@@ -353,7 +365,7 @@ async def clear_thumb_handler(_, m):
     if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
         os.remove(sess.custom_thumb_path)
     sess.custom_thumb_path = None
-    await m.reply("🗑 **Custom Thumbnail Deleted.**")
+    await m.reply("🗑 **Thumbnail Deleted.**")
 
 @app.on_message(filters.command("viewthumb") & authorized_only)
 async def view_thumb_handler(_, m):
@@ -377,11 +389,30 @@ async def set_static(_, m):
     sess.watermark_mode = "static"
     await m.reply("📍 **Static Mode**\nSend the watermark text:")
 
+# --- CHANGE: NEW CODEC COMMAND ---
+@app.on_message(filters.command("codec") & authorized_only)
+async def set_codec(_, m):
+    try:
+        sess = await get_session(m.from_user.id)
+        arg = m.command[1] if len(m.command) > 1 else ""
+        
+        if arg == "265":
+            sess.codec = "libx265"
+            await m.reply("✅ Codec set to **H.265 (HEVC)**.\nSmaller files, slower speed.")
+        elif arg == "264":
+            sess.codec = "libx264"
+            await m.reply("✅ Codec set to **H.264 (AVC)**.\nFaster speed, standard compatibility.")
+        else:
+            await m.reply("Usage:\n`/codec 264` (Fast)\n`/codec 265` (Small Size)")
+    except: await m.reply("Error setting codec.")
+
 @app.on_message(filters.command("settings") & authorized_only)
 async def settings_handler(_, m):
     sess = await get_session(m.from_user.id)
     thumb_status = "✅ Set" if sess.custom_thumb_path else "❌ Auto"
-    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nCRF: {sess.crf}\nRes: {sess.resolution}p\nThumb: {thumb_status}\nCodec: HEVC (H.265)")
+    # Friendly name for codec
+    c_name = "HEVC (H.265)" if sess.codec == "libx265" else "AVC (H.264)"
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nCodec: `{c_name}`\nCRF: {sess.crf}\nRes: {sess.resolution}p\nThumb: {thumb_status}")
 
 @app.on_message(filters.command("crf") & authorized_only)
 async def set_crf(_, m):
@@ -420,7 +451,6 @@ async def media_handler(c, m):
 
     status = await m.reply("⬇️ **Downloading...**")
     
-    # --- SAFE FILE NAMING ---
     dl_path = os.path.join(WORK_DIR, f"in_{m.from_user.id}_{m.id}_{int(time.time())}.mp4")
     
     path = await c.download_media(file, file_name=dl_path, progress=download_progress, progress_args=(status, time.time()))
@@ -430,7 +460,18 @@ async def media_handler(c, m):
         await status.edit("✅ **Queued**")
         asyncio.create_task(worker(m.from_user.id))
 
+# --- CHANGE: STARTUP MESSAGE LOGIC ---
 if __name__ == "__main__":
     check_resources()
-    print("Bot Started...")
-    app.run()
+    print("Bot is starting...")
+    app.start()
+    
+    # Send startup message
+    try:
+        app.send_message(OWNER_ID, "Hey Vaisu welcome back")
+    except Exception as e:
+        print(f"Startup message failed: {e}")
+    
+    print("Bot is now running.")
+    idle()
+    app.stop()
