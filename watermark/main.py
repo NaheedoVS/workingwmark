@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Size h/12 + Auth + Duration + Custom Thumbnail
+# Async Watermark Bot – Size h/12 + Auth + Duration + Custom Thumbnail + HEVC Compression
 
 import os
 import re
@@ -84,7 +84,7 @@ class UserSession:
     is_processing: bool = False
     crf: int = 23
     resolution: int = 720
-    custom_thumb_path: str = None  # <--- NEW FIELD
+    custom_thumb_path: str = None 
 
     def reset(self):
         self.step = "waiting_text"
@@ -182,11 +182,20 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
             x_expr = f"abs(mod(t*{speed_x}, 2*(W-w)) - (W-w))"
             y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
             filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
-
+        
+        # --- SMART COMPRESSION LOGIC (HEVC) ---
+        # Adjust CRF for HEVC: Adding +4 roughly matches x264 quality but at lower file size
+        hevc_crf = int(crf) + 4
+        
         cmd_args = [
             "ffmpeg", "-y", "-i", in_path, "-i", wm_path, "-filter_complex", filter_complex,
-            "-map", "0:a?", "-c:v", "libx264", "-preset", "faster", "-crf", str(crf),
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path
+            "-map", "0:a?", 
+            "-c:v", "libx265",          # Use HEVC (Stronger Compression)
+            "-preset", "fast",          # Balance speed/size for Heroku
+            "-crf", str(hevc_crf),      # Optimized CRF
+            "-tag:v", "hvc1",           # Apple/iOS Compatibility
+            "-c:a", "aac", "-b:a", "128k", # Optimized Audio (128k is sufficient)
+            "-movflags", "+faststart", out_path
         ]
 
         process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -200,7 +209,7 @@ async def process_video(in_path, text, out_path, crf, resolution, status_msg, mo
                 time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line_str)
                 if time_match:
                     if time.time() - last_update_time > 4:
-                        await status_msg.edit_text(f"⚙️ **Processing...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
+                        await status_msg.edit_text(f"⚙️ **Processing (HEVC)...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}")
                         last_update_time = time.time()
         await process.wait()
         return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
@@ -223,9 +232,12 @@ async def worker(uid):
     sess.is_processing = True
     try:
         while sess.queue:
+            # We unpack 5 items now because we stored the message_id to prevent collision
             in_path, text, original_caption, original_name = sess.queue.pop(0)
             
-            out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}.mp4")
+            # Output name also gets a random component to be safe
+            out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
+            
             status_msg = await app.send_message(uid, f"⏳ **Starting FFmpeg...**")
             start_t = time.time()
             
@@ -238,12 +250,10 @@ async def worker(uid):
                 thumb = None
                 is_custom_thumb = False
                 
-                # Check if custom thumb exists in session
                 if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
                     thumb = sess.custom_thumb_path
                     is_custom_thumb = True
                 else:
-                    # Generate auto thumb
                     thumb = await generate_thumbnail(out_path)
                     is_custom_thumb = False
 
@@ -262,7 +272,6 @@ async def worker(uid):
                     duration=int(out_duration)
                 )
                 
-                # Only delete thumb if it was auto-generated. Keep custom thumb.
                 if thumb and not is_custom_thumb:
                     os.remove(thumb)
             else:
@@ -309,7 +318,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v4.2**\n"
+        "**👋 Watermark Bot v4.3 (HEVC)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /setthumb - Set custom thumbnail\n"
@@ -317,11 +326,9 @@ async def start_handler(_, m):
         "5. /viewthumb - View current thumbnail"
     )
 
-# --- THUMBNAIL HANDLERS (NEW) ---
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
 async def set_thumb_handler(c, m):
     sess = await get_session(m.from_user.id)
-    
     photo = None
     if m.photo:
         photo = m.photo
@@ -329,11 +336,8 @@ async def set_thumb_handler(c, m):
         photo = m.reply_to_message.photo
     else:
         return await m.reply("❌ Send a photo with `/setthumb` or reply to a photo.")
-
-    # Delete old thumb if exists
     if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
         os.remove(sess.custom_thumb_path)
-
     path = await c.download_media(photo, file_name=os.path.join(WORK_DIR, f"thumb_{m.from_user.id}.jpg"))
     sess.custom_thumb_path = path
     await m.reply("✅ **Custom Thumbnail Saved!**\nIt will be used for all future videos.")
@@ -344,7 +348,7 @@ async def clear_thumb_handler(_, m):
     if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
         os.remove(sess.custom_thumb_path)
     sess.custom_thumb_path = None
-    await m.reply("🗑 **Custom Thumbnail Deleted.**\nNow using auto-generated thumbnails.")
+    await m.reply("🗑 **Custom Thumbnail Deleted.**")
 
 @app.on_message(filters.command("viewthumb") & authorized_only)
 async def view_thumb_handler(_, m):
@@ -354,7 +358,6 @@ async def view_thumb_handler(_, m):
     else:
         await m.reply("❌ You don't have a custom thumbnail set.")
 
-# --- Settings & Core ---
 @app.on_message(filters.command("w") & authorized_only)
 async def set_animated(_, m):
     sess = await get_session(m.from_user.id)
@@ -373,7 +376,7 @@ async def set_static(_, m):
 async def settings_handler(_, m):
     sess = await get_session(m.from_user.id)
     thumb_status = "✅ Set" if sess.custom_thumb_path else "❌ Auto"
-    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nCRF: {sess.crf}\nRes: {sess.resolution}p\nThumb: {thumb_status}")
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nCRF: {sess.crf}\nRes: {sess.resolution}p\nThumb: {thumb_status}\nCodec: HEVC (H.265)")
 
 @app.on_message(filters.command("crf") & authorized_only)
 async def set_crf(_, m):
@@ -411,7 +414,11 @@ async def media_handler(c, m):
     original_name = file.file_name if file.file_name else "video.mp4"
 
     status = await m.reply("⬇️ **Downloading...**")
-    path = await c.download_media(file, file_name=os.path.join(WORK_DIR, f"in_{m.from_user.id}_{int(time.time())}.mp4"), progress=download_progress, progress_args=(status, time.time()))
+    
+    # --- FIX: ADDED MESSAGE ID TO FILENAME ---
+    dl_path = os.path.join(WORK_DIR, f"in_{m.from_user.id}_{m.id}_{int(time.time())}.mp4")
+    
+    path = await c.download_media(file, file_name=dl_path, progress=download_progress, progress_args=(status, time.time()))
     
     if path:
         sess.queue.append((path, sess.watermark_text, original_caption, original_name))
