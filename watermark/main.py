@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Consistent Size (Min Dimension Logic)
+# Async Watermark Bot – Size Logic from Code 1 (Res/18)
 
 import os
 import re
@@ -35,6 +35,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ==================== GLOBAL CONSTANTS ====================
+# Define Resampling Mode compatibility for older/newer Pillow versions
+RESAMPLE_MODE = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS
 
 # ==================== AUTH MANAGER ====================
 def load_auth_users() -> Set[int]:
@@ -144,46 +148,36 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK LOGIC (Min Dimension / 12) ====================
-def create_watermark(text: str, reference_size: int) -> str:
-    # 1. Define Size based on the SHORTEST side of the video
-    # This prevents the watermark from looking huge on vertical videos
-    font_size = int(reference_size / 12)
+# ==================== WATERMARK LOGIC (From Code 1) ====================
+def create_watermark(text: str):
+    # Generates a high-quality base image (Font Size 80)
+    # This will be resized later based on resolution
+    font_size = 80
+    font = ImageFont.load_default()
     
-    # Safety minimum size
-    if font_size < 20: font_size = 20
-        
-    font = get_font(font_size)
+    # Try loading custom fonts
+    for p in [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
+        if os.path.exists(p):
+            try: 
+                font = ImageFont.truetype(p, font_size)
+                break
+            except: continue
 
-    # 2. Measure Text
-    dummy = ImageDraw.Draw(Image.new("RGBA", (1,1)))
-    bbox = dummy.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-
-    # 3. Add Padding for Pill Shape
-    padding_x = int(font_size * 0.6)
-    padding_y = int(font_size * 0.3)
+    dummy = Image.new("RGBA", (1, 1))
+    d = ImageDraw.Draw(dummy)
+    bbox = d.textbbox((0, 0), text, font=font)
     
-    box_w = text_w + (padding_x * 2)
-    box_h = text_h + (padding_y * 2)
-
-    # 4. Create Image
-    img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    # Padding settings from Code 1
+    px, py = 40, 20
+    w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+    
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    # 5. Draw Background & Text
-    draw.rounded_rectangle((0, 0, box_w - 1, box_h - 1), radius=box_h // 2, fill=(0, 0, 0, 180))
     
-    text_x = padding_x
-    text_y = padding_y - int(font_size * 0.1) 
-    
-    draw.text((text_x, text_y), text, font=font, fill="white")
-
-    # 6. Save
-    wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
-    img.save(wm_path, "PNG")
-    return wm_path
+    # Draw pill shape
+    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
+    draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
+    return img
 
 # ==================== PROCESSOR ====================
 async def get_video_info(path):
@@ -197,35 +191,37 @@ async def get_video_info(path):
     except: return 0, 0, 0
 
 async def process_video(in_path, text, out_path, crf, resolution, codec, status_msg, mode="static"):
-    wm_path = None
+    wm_path = f"{WORK_DIR}/wm_{int(time.time())}_{os.getpid()}.png"
+    
     try:
         in_w, in_h, duration = await get_video_info(in_path)
         if duration == 0: duration = 1 
         
-        # --- FIXED SIZE CALCULATION ---
-        # Calculate target dimensions to find the shortest side
-        # Current logic scales to height=resolution (e.g. 720)
-        target_h = resolution
-        target_w = int(resolution * (in_w / in_h))
+        # --- WATERMARK SIZING LOGIC FROM CODE 1 ---
+        # 1. Generate High-Res Watermark
+        wm_full = await asyncio.to_thread(create_watermark, text)
         
-        # We use the SMALLER of the two dimensions to calculate font size.
-        # This ensures it looks consistent on both Landscape and Portrait.
-        ref_size = min(target_w, target_h)
+        # 2. Calculate Target Height (Resolution / 18)
+        target_wm_height = int(resolution / 18)
         
-        wm_path = create_watermark(text, ref_size)
+        # 3. Calculate Target Width (Aspect Ratio)
+        target_wm_width = int(target_wm_height * (wm_full.width / wm_full.height))
         
-        filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
-        last_stream = "[bg]"
-
-        if mode == "static":
-            # Margin is also relative to the shortest side
-            margin = int(ref_size * 0.05) 
-            filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
+        # 4. Resize using High Quality Resampling
+        wm = await asyncio.to_thread(wm_full.resize, (target_wm_width, target_wm_height), RESAMPLE_MODE)
+        await asyncio.to_thread(wm.save, wm_path)
+        
+        # 5. Overlay Logic
+        # Static: Bottom Right with 20px padding
+        # Animated: Slide logic
+        if mode == "slide" or mode == "animated":
+             # Note: Code 1 used a specific slide formula
+             overlay_cmd = "x='-w+((W+w)*((mod(t,30))/30))':y=H-h-20"
         else:
-            speed_x, speed_y = resolution // 15, resolution // 20
-            x_expr = f"abs(mod(t*{speed_x}, 2*(W-w)) - (W-w))"
-            y_expr = f"abs(mod(t*{speed_y}, 2*(H-h)) - (H-h))"
-            filter_complex += f"{last_stream}[1:v]overlay=x='{x_expr}':y='{y_expr}'"
+             # Static
+             overlay_cmd = "x=W-w-20:y=H-h-20"
+        
+        filter_complex = f"[0:v]scale=-2:{resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
         
         cmd_args = [
             "ffmpeg", "-y", "-i", in_path, "-i", wm_path, "-filter_complex", filter_complex,
@@ -269,7 +265,7 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
         logger.error(f"FFmpeg Error: {e}")
         return False
     finally:
-        if wm_path and os.path.exists(wm_path): os.remove(wm_path)
+        if os.path.exists(wm_path): os.remove(wm_path)
 
 async def generate_thumbnail(video_path):
     thumb_path = f"{video_path}.jpg"
@@ -397,7 +393,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v5.4 (Universal Size Fix)**\n"
+        "**👋 Watermark Bot v6.0 (Code 1 Logic Integrated)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /codec 264 - Fast Mode\n"
