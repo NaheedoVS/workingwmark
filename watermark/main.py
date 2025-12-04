@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Size H/12 + Standard Quality + Flood Safety
+# Async Watermark Bot – Consistent Size (Min Dimension Logic)
 
 import os
 import re
@@ -144,11 +144,15 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK LOGIC (Standard H/12) ====================
-def create_watermark(text: str, target_video_height: int) -> str:
-    # 1. Define Size (H/12) - Standard Quality (No Upscaling)
-    # Using 'int' ensures it's an integer pixel value
-    font_size = int(target_video_height / 12)
+# ==================== WATERMARK LOGIC (Min Dimension / 12) ====================
+def create_watermark(text: str, reference_size: int) -> str:
+    # 1. Define Size based on the SHORTEST side of the video
+    # This prevents the watermark from looking huge on vertical videos
+    font_size = int(reference_size / 12)
+    
+    # Safety minimum size
+    if font_size < 20: font_size = 20
+        
     font = get_font(font_size)
 
     # 2. Measure Text
@@ -158,7 +162,6 @@ def create_watermark(text: str, target_video_height: int) -> str:
     text_h = bbox[3] - bbox[1]
 
     # 3. Add Padding for Pill Shape
-    # Standard padding relative to font size
     padding_x = int(font_size * 0.6)
     padding_y = int(font_size * 0.3)
     
@@ -170,12 +173,9 @@ def create_watermark(text: str, target_video_height: int) -> str:
     draw = ImageDraw.Draw(img)
 
     # 5. Draw Background & Text
-    # Pill shape background
     draw.rounded_rectangle((0, 0, box_w - 1, box_h - 1), radius=box_h // 2, fill=(0, 0, 0, 180))
     
-    # Center text manually
     text_x = padding_x
-    # Slight adjustment for visual centering of text baseline
     text_y = padding_y - int(font_size * 0.1) 
     
     draw.text((text_x, text_y), text, font=font, fill="white")
@@ -202,14 +202,24 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
         in_w, in_h, duration = await get_video_info(in_path)
         if duration == 0: duration = 1 
         
-        # Pass resolution (target height) to watermark creator to ensure H/12 logic works
-        wm_path = create_watermark(text, resolution)
+        # --- FIXED SIZE CALCULATION ---
+        # Calculate target dimensions to find the shortest side
+        # Current logic scales to height=resolution (e.g. 720)
+        target_h = resolution
+        target_w = int(resolution * (in_w / in_h))
+        
+        # We use the SMALLER of the two dimensions to calculate font size.
+        # This ensures it looks consistent on both Landscape and Portrait.
+        ref_size = min(target_w, target_h)
+        
+        wm_path = create_watermark(text, ref_size)
         
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
         last_stream = "[bg]"
 
         if mode == "static":
-            margin = int(resolution * 0.03)
+            # Margin is also relative to the shortest side
+            margin = int(ref_size * 0.05) 
             filter_complex += f"{last_stream}[1:v]overlay=W-w-{margin}:H-h-{margin}"
         else:
             speed_x, speed_y = resolution // 15, resolution // 20
@@ -387,7 +397,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v5.3 (Safety + H/12 Standard)**\n"
+        "**👋 Watermark Bot v5.4 (Universal Size Fix)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /codec 264 - Fast Mode\n"
