@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – 2 Min Interval + Flood Safety + Strict Queue
+# Async Watermark Bot – Size H/12 + Standard Quality + Flood Safety
 
 import os
 import re
@@ -128,7 +128,6 @@ async def safe_edit(msg, text, timer_ref):
         timer_ref[0] = now
     except FloodWait as e:
         logger.warning(f"FloodWait hit! Sleeping updates for {e.value}s")
-        # Fake the timer so we don't try again for the duration of the ban
         timer_ref[0] = now + e.value + 10
     except MessageNotModified:
         pass
@@ -137,9 +136,7 @@ async def safe_edit(msg, text, timer_ref):
 
 # ==================== DOWNLOAD PROGRESS ====================
 async def download_progress(current, total, status_msg, start_time, last_update_ref):
-    # Only update if finished or interval passed
     if current == total:
-        # Force update on completion
         pass
     elif (time.time() - last_update_ref[0]) < UPDATE_INTERVAL:
         return
@@ -147,40 +144,45 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK LOGIC ====================
+# ==================== WATERMARK LOGIC (Standard H/12) ====================
 def create_watermark(text: str, target_video_height: int) -> str:
-    scale_factor = 3
-    base_font_size = int((target_video_height // 12) * scale_factor)
-    font = get_font(base_font_size)
+    # 1. Define Size (H/12) - Standard Quality (No Upscaling)
+    # Using 'int' ensures it's an integer pixel value
+    font_size = int(target_video_height / 12)
+    font = get_font(font_size)
 
-    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
-    bbox = dummy_draw.textbbox((0, 0), text, font=font, stroke_width=0)
-    w_raw, h_raw = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # 2. Measure Text
+    dummy = ImageDraw.Draw(Image.new("RGBA", (1,1)))
+    bbox = dummy.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
 
-    text_img = Image.new("RGBA", (w_raw, h_raw + (40 * scale_factor)), (0,0,0,0))
-    d_text = ImageDraw.Draw(text_img)
-    d_text.text((0, 0), text, font=font, fill="white", stroke_width=0)
-    if text_img.getbbox(): text_img = text_img.crop(text_img.getbbox())
-
-    cur_w, cur_h = text_img.size
-    distort_w, distort_h = int(cur_w * 1.0), int(cur_h * 1.0)
-    text_img = text_img.resize((distort_w, distort_h), Image.Resampling.LANCZOS)
-
-    padding_x, padding_y = int(base_font_size * 0.4), int(base_font_size * 0.2)
-    box_w, box_h = distort_w + (padding_x * 2), distort_h + (padding_y * 2)
-
-    bg_img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(bg_img)
-    draw.rounded_rectangle((0, 0, box_w, box_h), radius=box_h // 2, fill=(0, 0, 0, 180))
+    # 3. Add Padding for Pill Shape
+    # Standard padding relative to font size
+    padding_x = int(font_size * 0.6)
+    padding_y = int(font_size * 0.3)
     
-    px, py = (box_w - distort_w) // 2, (box_h - distort_h) // 2
-    bg_img.paste(text_img, (px, py), text_img)
+    box_w = text_w + (padding_x * 2)
+    box_h = text_h + (padding_y * 2)
 
-    final_w, final_h = int(box_w / scale_factor), int(box_h / scale_factor)
-    final_img = bg_img.resize((final_w, final_h), Image.Resampling.LANCZOS)
+    # 4. Create Image
+    img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
+    # 5. Draw Background & Text
+    # Pill shape background
+    draw.rounded_rectangle((0, 0, box_w - 1, box_h - 1), radius=box_h // 2, fill=(0, 0, 0, 180))
+    
+    # Center text manually
+    text_x = padding_x
+    # Slight adjustment for visual centering of text baseline
+    text_y = padding_y - int(font_size * 0.1) 
+    
+    draw.text((text_x, text_y), text, font=font, fill="white")
+
+    # 6. Save
     wm_path = os.path.join(WORK_DIR, f"wm_{int(time.time())}_{random.randint(1,999)}.png")
-    final_img.save(wm_path, "PNG")
+    img.save(wm_path, "PNG")
     return wm_path
 
 # ==================== PROCESSOR ====================
@@ -199,6 +201,8 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
     try:
         in_w, in_h, duration = await get_video_info(in_path)
         if duration == 0: duration = 1 
+        
+        # Pass resolution (target height) to watermark creator to ensure H/12 logic works
         wm_path = create_watermark(text, resolution)
         
         filter_complex = f"[0:v]scale=-2:{resolution}[bg];"
@@ -234,7 +238,6 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
 
         process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         
-        # Safe Timer List
         last_update_time = [0]
         
         while True:
@@ -246,7 +249,6 @@ async def process_video(in_path, text, out_path, crf, resolution, codec, status_
             if "time=" in chunk_str:
                 time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", chunk_str)
                 if time_match:
-                    # Pass through Safety Valve with 2 Min Interval
                     codec_name = "HEVC" if codec == "libx265" else "AVC"
                     text = f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}"
                     await safe_edit(status_msg, text, last_update_time)
@@ -283,7 +285,6 @@ async def worker(uid):
             dl_path = os.path.join(WORK_DIR, f"in_{uid}_{int(time.time())}.mp4")
             
             try:
-                # Timer ref for Download
                 last_update_time = [0]
 
                 in_path = await app.download_media(
@@ -319,8 +320,6 @@ async def worker(uid):
                         thumb = await generate_thumbnail(out_path)
                         is_custom_thumb = False
 
-                    # Final 'Uploading' message doesn't need constant updates, 
-                    # we just set it once to avoid issues at the end.
                     await status_msg.edit_text(f"📤 **Uploading...**")
                     
                     name_root, ext = os.path.splitext(original_name)
@@ -388,7 +387,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v5.2 (Safety Mode)**\n"
+        "**👋 Watermark Bot v5.3 (Safety + H/12 Standard)**\n"
         "1. /ws - Static Watermark\n"
         "2. /w - Animated Watermark\n"
         "3. /codec 264 - Fast Mode\n"
