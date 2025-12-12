@@ -149,7 +149,7 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK GENERATION ====================
+# ==================== WATERMARK GENERATION (FIXED ALIGNMENT) ====================
 def create_watermark(text: str, style: str = "static"):
     font_size = 80
     font = ImageFont.load_default()
@@ -162,17 +162,20 @@ def create_watermark(text: str, style: str = "static"):
                 break
             except: continue
 
+    dummy = Image.new("RGBA", (1, 1))
+    d = ImageDraw.Draw(dummy)
+    
+    # Get strict bounding box
+    bbox = d.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
     if style == "static":
-        # === PILL SHAPE LOGIC (Radius 20, Padding 40/20) ===
-        px, py = 40, 20
+        # === PILL SHAPE LOGIC (Fixed 80px Height Context) ===
+        px, py = 40, 20  # Padding
         
-        dummy = Image.new("RGBA", (1, 1))
-        d = ImageDraw.Draw(dummy)
-        bbox = d.textbbox((0, 0), text, font=font)
-        
-        # Calculate Dimensions with Padding
-        w = bbox[2] - bbox[0] + px
-        h = bbox[3] - bbox[1] + py
+        w = text_w + px
+        h = text_h + py
         
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -180,13 +183,28 @@ def create_watermark(text: str, style: str = "static"):
         # Draw Box
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         
-        # Draw Text (Centered)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        x_pos = (w - text_w) // 2
-        y_pos = (h - text_h) // 2 - bbox[1] 
+        # Draw Text using Anchor "mm" (Middle-Middle)
+        # This ignores bbox offsets and forces true centering
+        center_x = w // 2
+        center_y = h // 2
+        draw.text((center_x, center_y), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
         
-        draw.text((x_pos, y_pos), text, font=font, fill=(255, 255, 255, 255))
+        return img
+
+    else:
+        # === MOVING STYLE LOGIC ===
+        px, py = 4, 4
+        
+        w = text_w + px
+        h = text_h + py
+        
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        center_x = w // 2
+        center_y = h // 2
+        draw.text((center_x, center_y), text, font=font, fill=(255, 0, 0, 255), anchor="mm")
+        
         return img
 
     else:
