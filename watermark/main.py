@@ -353,6 +353,8 @@ async def worker(uid):
                 
                 if success:
                     _, _, out_duration = await get_video_info(out_path)
+                    
+                    # Logic: Use custom thumb if set, otherwise generate from video
                     thumb = sess.custom_thumb_path if (sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path)) else await generate_thumbnail(out_path)
                     is_custom_thumb = (thumb == sess.custom_thumb_path)
 
@@ -366,6 +368,7 @@ async def worker(uid):
                         file_name=final_filename, duration=int(out_duration)
                     )
                     
+                    # Only delete thumb if it was auto-generated (not the custom one)
                     if thumb and not is_custom_thumb: os.remove(thumb)
                 else:
                     await status_msg.edit_text("❌ Processing Failed.")
@@ -410,25 +413,64 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v15.0 (Selective Scaling)**\n"
-        "1. `/dual` - **Static(Box) + Moving(Red)**\n"
-        "2. `/ws` - Static (Box + White)\n"
-        "3. `/w` - Animated Slide (Box + White)\n"
-        "4. `/wr` - Random (Red + No BG)\n"
-        "5. `/scale <x>` - Size Scale (Moving Only)\n"
-        "6. `/speed <x>` - Speed\n"
-        "7. `/reset` - Reset"
+        "**👋 Watermark Bot v16.1 (Full Menu)**\n"
+        "**Modes:**\n"
+        "1. `/dual` - Static + Moving\n"
+        "2. `/ws` - Static Mode\n"
+        "3. `/w` - Animated Mode\n"
+        "4. `/wr` - Random Red Mode\n\n"
+        "**Settings:**\n"
+        "5. `/res <720>` - Resolution\n"
+        "6. `/crf <23>` - Quality (0-51)\n"
+        "7. `/speed <x>` - Speed\n"
+        "8. `/scale <x>` - Size Scale\n\n"
+        "**Extras:**\n"
+        "9. `/setthumb` - Set Thumbnail\n"
+        "10. `/clearthumb` - Delete Thumbnail\n"
+        "11. `/settings` - Check Config\n"
+        "12. `/reset` - Reset Defaults"
     )
+
+# --- THUMBNAIL COMMANDS ---
 
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
 async def set_thumb_handler(c, m):
     sess = await get_session(m.from_user.id)
-    photo = m.photo or m.reply_to_message.photo
-    if not photo: return await m.reply("❌ Send/Reply to a photo.")
-    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path): os.remove(sess.custom_thumb_path)
+    # Handle both direct photo and reply to photo
+    photo = m.photo
+    if not photo and m.reply_to_message:
+        photo = m.reply_to_message.photo
+        
+    if not photo:
+        return await m.reply("❌ **Send a photo** or **Reply to a photo** with `/setthumb`.")
+        
+    # Delete old thumb if exists
+    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+        try: os.remove(sess.custom_thumb_path)
+        except: pass
+        
     path = await c.download_media(photo, file_name=os.path.join(WORK_DIR, f"thumb_{m.from_user.id}.jpg"))
     sess.custom_thumb_path = path
     await m.reply("✅ **Custom Thumbnail Saved!**")
+
+@app.on_message(filters.command(["clearthumb", "removethumb"]) & authorized_only)
+async def clear_thumb_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+        try: os.remove(sess.custom_thumb_path)
+        except: pass
+    sess.custom_thumb_path = None
+    await m.reply("🗑 **Thumbnail Deleted.**")
+
+@app.on_message(filters.command("viewthumb") & authorized_only)
+async def view_thumb_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+        await m.reply_photo(sess.custom_thumb_path, caption="🖼 **Your Custom Thumbnail**")
+    else:
+        await m.reply("❌ **No custom thumbnail set.**")
+
+# --------------------------
 
 @app.on_message(filters.command("dual") & authorized_only)
 async def set_dual(_, m):
@@ -483,6 +525,28 @@ async def set_scale(_, m):
         await m.reply(f"🔎 **Watermark Scale Set to {val}x**")
     except: await m.reply("❌ Invalid number.")
 
+@app.on_message(filters.command(["res", "resolution"]) & authorized_only)
+async def set_res(_, m):
+    try:
+        if len(m.command) != 2: return await m.reply("Usage: `/res 720` (480, 720, 1080)")
+        val = int(m.command[1])
+        if val < 144: return await m.reply("❌ Resolution too low.")
+        sess = await get_session(m.from_user.id)
+        sess.resolution = val
+        await m.reply(f"📺 **Resolution Set to {val}p**")
+    except: await m.reply("❌ Invalid number.")
+
+@app.on_message(filters.command("crf") & authorized_only)
+async def set_crf(_, m):
+    try:
+        if len(m.command) != 2: return await m.reply("Usage: `/crf 23` (0-51, Lower is better quality)")
+        val = int(m.command[1])
+        if not (0 <= val <= 51): return await m.reply("❌ CRF must be 0-51.")
+        sess = await get_session(m.from_user.id)
+        sess.crf = val
+        await m.reply(f"🎨 **CRF Set to {val}**")
+    except: await m.reply("❌ Invalid number.")
+
 @app.on_message(filters.command("reset") & authorized_only)
 async def reset_settings(_, m):
     sess = await get_session(m.from_user.id)
@@ -513,7 +577,8 @@ async def set_codec(_, m):
 async def settings_handler(_, m):
     sess = await get_session(m.from_user.id)
     sz = f"{sess.custom_size[0]}x{sess.custom_size[1]}" if sess.custom_size else "Auto"
-    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nSpeed: `{sess.speed_factor}x`\nScale: `{sess.watermark_scale}x`\nSize: `{sz}`\nCodec: `{sess.codec}`")
+    thumb_status = "✅ Set" if sess.custom_thumb_path else "❌ None"
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nRes: `{sess.resolution}p`\nCRF: `{sess.crf}`\nSpeed: `{sess.speed_factor}x`\nScale: `{sess.watermark_scale}x`\nSize: `{sz}`\nCodec: `{sess.codec}`\nThumb: {thumb_status}")
 
 @app.on_message(filters.text & filters.private & authorized_only)
 async def text_handler(_, m):
