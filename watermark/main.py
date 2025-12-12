@@ -184,15 +184,45 @@ def create_watermark(text: str, style: str = "static"):
         return img
 
 # ==================== VIDEO PROCESSING (FIXED) ====================
+# ==================== VIDEO PROCESSING (DEBUG MODE) ====================
 async def get_video_info(path):
-    # Probing the video to get width/height/duration
-    cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", path]
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, _ = await proc.communicate()
+    # Debug: Check if file exists
+    if not os.path.exists(path):
+        logger.error(f"❌ File not found: {path}")
+        return 0, 0, 0
+        
     try:
-        m = json.loads(out)["streams"][0]
-        return int(m["width"]), int(m["height"]), float(m["duration"])
-    except: return 0, 0, 0
+        # Run ffprobe
+        cmd = [
+            "ffprobe", 
+            "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height,duration", 
+            "-of", "json", 
+            path
+        ]
+        
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, 
+            stdout=asyncio.subprocess.PIPE, 
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode != 0:
+            logger.error(f"❌ FFprobe Error: {stderr.decode()}")
+            return 0, 0, 0
+            
+        data = json.loads(stdout)
+        stream = data["streams"][0]
+        return int(stream["width"]), int(stream["height"]), float(stream.get("duration", 0))
+        
+    except FileNotFoundError:
+        logger.error("❌ FFmpeg/FFprobe is NOT installed on this server!")
+        return 0, 0, 0
+    except Exception as e:
+        logger.error(f"❌ Info Error: {e}")
+        return 0, 0, 0
 
 async def process_video(in_path, out_path, sess, status_msg):
     pid = os.getpid()
@@ -203,34 +233,29 @@ async def process_video(in_path, out_path, sess, status_msg):
     try:
         vw, vh, dur = await get_video_info(in_path)
         
-        # SAFETY CHECK: If video analysis failed, stop here
         if vw == 0 or vh == 0:
-            logger.error("❌ FFprobe failed to detect video dimensions.")
+            # If this hits, check your logs for the specific error from get_video_info
             return False
+        
         if dur == 0: dur = 1
         
         inputs = ["-i", in_path]
         filter_parts = []
         
-        # Scale Base Video to output resolution (must be even)
+        # Scale Base Video
         res = make_even(sess.resolution)
         filter_parts.append(f"[0:v]scale=-2:{res}[bg]")
         curr = "[bg]"
         
-        # --- PREPARE IMAGES ---
-        
-        # 1. Static Image Logic
+        # --- IMAGES ---
         if sess.watermark_mode in ["static", "dual"]:
             raw_s = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, "static")
-            h_s = make_even(res / 18)
-            # Prevent 0px height crash
-            h_s = max(2, h_s) 
+            h_s = max(2, make_even(res / 18))
             w_s = make_even(h_s * (raw_s.width / raw_s.height))
             img_s = await asyncio.to_thread(raw_s.resize, (w_s, h_s), RESAMPLE_MODE)
             await asyncio.to_thread(img_s.save, wm_s_path)
             inputs.extend(["-i", wm_s_path])
 
-        # 2. Moving Image Logic (Handles 'moving' AND 'lissajous')
         if sess.watermark_mode in ["moving", "lissajous", "dual"]:
             txt = sess.watermark_text if sess.watermark_text else "Watermark"
             raw_m = await asyncio.to_thread(create_watermark, txt, "moving")
@@ -238,32 +263,26 @@ async def process_video(in_path, out_path, sess, status_msg):
             if sess.custom_size:
                 w_m, h_m = sess.custom_size
             else:
-                h_m = make_even((res / 25) * sess.scale)
-                h_m = max(2, h_m) # Safety
+                h_m = max(2, make_even((res / 25) * sess.scale))
                 w_m = make_even(h_m * (raw_m.width / raw_m.height))
             
             img_m = await asyncio.to_thread(raw_m.resize, (w_m, h_m), RESAMPLE_MODE)
             await asyncio.to_thread(img_m.save, wm_m_path)
             inputs.extend(["-i", wm_m_path])
 
-        # --- BUILD FILTER CHAIN ---
+        # --- FILTERS ---
         sp = sess.speed
         lissa_cmd = f"x='(W-w)/2 + (W-w)/3*sin(t*{sp})':y='(H-h)/2 + (H-h)/3*cos(t*{sp}*2.2)'"
         static_cmd = "x=W-w-20:y=H-h-20"
 
         if sess.watermark_mode == "static":
             filter_parts.append(f"{curr}[1:v]overlay={static_cmd}")
-            
         elif sess.watermark_mode in ["moving", "lissajous"]:
             filter_parts.append(f"{curr}[1:v]overlay={lissa_cmd}")
-            
         elif sess.watermark_mode == "dual":
-            # Input 1 (Static) -> [v1]
             filter_parts.append(f"{curr}[1:v]overlay={static_cmd}[v1]")
-            # Input 2 (Moving) on [v1] -> Out
             filter_parts.append(f"[v1][2:v]overlay={lissa_cmd}")
 
-        # --- EXECUTE FFMPEG ---
         cmd = ["ffmpeg", "-y"] + inputs + [
             "-filter_complex", ";".join(filter_parts),
             "-map", "0:a?", "-c:v", sess.codec, "-preset", "fast",
@@ -283,13 +302,8 @@ async def process_video(in_path, out_path, sess, status_msg):
         while True:
             chunk = await proc.stderr.read(4096)
             if not chunk: break
-            # Capture Progress
             try:
                 line = chunk.decode('utf-8', 'ignore')
-                # Print errors to logs for debugging
-                if "Error" in line or "Invalid" in line:
-                    logger.error(f"FFmpeg Output: {line.strip()}")
-                    
                 if "time=" in line:
                     tm = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line)
                     if tm:
@@ -297,16 +311,10 @@ async def process_video(in_path, out_path, sess, status_msg):
             except: pass
         
         await proc.wait()
-        
-        # Verification
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
-            return True
-        else:
-            logger.error("❌ Output file not found or empty.")
-            return False
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 100
         
     except Exception as e:
-        logger.error(f"Process Exception: {e}")
+        logger.error(f"Proc Error: {e}")
         return False
     finally:
         if os.path.exists(wm_s_path): os.remove(wm_s_path)
