@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Final Restore (Static Box / Moving Red)
+# Async Watermark Bot – Final Combined
+# Features: 
+# 1. Static Text ALWAYS "🦋Vaiᡣ𐭩Su"
+# 2. Static Size = Resolution / 18 (From Code 2)
+# 3. Moving Logic = Variable/Scaled (From Code 1)
 
 import os
 import re
@@ -26,8 +30,8 @@ AUTH_FILE = "auth_users.json"
 
 # === TUNING ===
 UPDATE_INTERVAL = 120 
-
 FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan2"
+FIXED_STATIC_TEXT = "🦋Vaiᡣ𐭩Su"  # <--- HARDCODED STATIC TEXT
 
 os.makedirs(WORK_DIR, exist_ok=True)
 logging.basicConfig(
@@ -207,13 +211,13 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         
         # --- SIZE CALCULATION LOGIC ---
         def get_target_size(base_img, is_static_style=True):
-            # CONSTANT STATIC SIZE LOGIC
+            # 1. FIXED STATIC SIZE LOGIC (FROM CODE 2)
             if is_static_style:
-                target_height = int(sess.resolution / 18)
+                target_height = int(sess.resolution / 18) # Hard Logic from Code 2
                 target_width = int(target_height * (base_img.width / base_img.height))
                 return target_width, target_height
             
-            # VARIABLE MOVING SIZE LOGIC
+            # 2. MOVING SIZE LOGIC (FROM CODE 1 - VARIABLE)
             else:
                 if sess.custom_size:
                     return sess.custom_size
@@ -225,13 +229,13 @@ async def process_video(in_path, text, out_path, sess, status_msg):
                     return t_w, t_h
 
         if sess.watermark_mode == "dual":
-            # 1. Static Part (Box + White)
-            wm_static_raw = await asyncio.to_thread(create_watermark, text, style="static")
+            # 1. Static Part (ALWAYS HARDCODED TEXT)
+            wm_static_raw = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, style="static")
             w1, h1 = get_target_size(wm_static_raw, is_static_style=True)
             wm_static = await asyncio.to_thread(wm_static_raw.resize, (w1, h1), RESAMPLE_MODE)
             await asyncio.to_thread(wm_static.save, wm_path)
 
-            # 2. Moving Part (Red, No Box)
+            # 2. Moving Part (User Input Text - Red, No Box)
             wm_move_raw = await asyncio.to_thread(create_watermark, sess.second_watermark_text, style="moving")
             w2, h2 = get_target_size(wm_move_raw, is_static_style=False)
             wm_move = await asyncio.to_thread(wm_move_raw.resize, (w2, h2), RESAMPLE_MODE)
@@ -250,13 +254,22 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         else:
             # Single Mode
             if sess.watermark_mode == "random":
+                # Moving Mode -> Use User Text
                 style = "moving"
                 is_static = False
-            else:
+                wm_text_to_use = text
+            elif sess.watermark_mode == "static":
+                # Static Mode -> FORCE FIXED TEXT
                 style = "static"
                 is_static = True
+                wm_text_to_use = FIXED_STATIC_TEXT
+            else:
+                # Animated/Slide Mode
+                style = "static" 
+                is_static = True
+                wm_text_to_use = FIXED_STATIC_TEXT
 
-            wm_full = await asyncio.to_thread(create_watermark, text, style=style)
+            wm_full = await asyncio.to_thread(create_watermark, wm_text_to_use, style=style)
             w, h = get_target_size(wm_full, is_static_style=is_static)
             wm = await asyncio.to_thread(wm_full.resize, (w, h), RESAMPLE_MODE)
             await asyncio.to_thread(wm.save, wm_path)
@@ -413,17 +426,17 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v16.1 (Full Menu)**\n"
+        "**👋 Watermark Bot vFinal (Locked Static)**\n"
         "**Modes:**\n"
-        "1. `/dual` - Static + Moving\n"
-        "2. `/ws` - Static Mode\n"
-        "3. `/w` - Animated Mode\n"
-        "4. `/wr` - Random Red Mode\n\n"
+        "1. `/dual` - Static (Locked) + Moving\n"
+        "2. `/ws` - Static Mode (Locked Text)\n"
+        "3. `/w` - Animated Mode (Locked Text)\n"
+        "4. `/wr` - Random Red Mode (Custom Text)\n\n"
         "**Settings:**\n"
         "5. `/res <720>` - Resolution\n"
         "6. `/crf <23>` - Quality (0-51)\n"
         "7. `/speed <x>` - Speed\n"
-        "8. `/scale <x>` - Size Scale\n\n"
+        "8. `/scale <x>` - Size Scale (Moving Only)\n\n"
         "**Extras:**\n"
         "9. `/setthumb` - Set Thumbnail\n"
         "10. `/clearthumb` - Delete Thumbnail\n"
@@ -479,7 +492,8 @@ async def set_dual(_, m):
     sess.watermark_mode = "dual"
     await m.reply(
         "✨ **Dual Mode**\n"
-        "Format: `Static (Box) | Moving (Red)`"
+        f"Static: Locked to `{FIXED_STATIC_TEXT}`\n"
+        "Send the text for the **Moving (Red)** watermark:"
     )
 
 @app.on_message(filters.command("w") & authorized_only)
@@ -487,14 +501,16 @@ async def set_animated(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "animated"
-    await m.reply("✨ **Animated Slide Mode**\nSend the watermark text:")
+    await m.reply(f"✨ **Animated Slide Mode**\nLocked to: `{FIXED_STATIC_TEXT}`\nJust send video now.")
+    sess.step = "waiting_media"
 
 @app.on_message(filters.command("ws") & authorized_only)
 async def set_static(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "static"
-    await m.reply("📍 **Static Mode**\n(Box + White Text)\nSend the watermark text:")
+    await m.reply(f"📍 **Static Mode**\nLocked to: `{FIXED_STATIC_TEXT}`\nJust send video now.")
+    sess.step = "waiting_media"
 
 @app.on_message(filters.command("wr") & authorized_only)
 async def set_random(_, m):
@@ -508,43 +524,44 @@ async def set_speed(_, m):
     try:
         if len(m.command) != 2: return await m.reply("Usage: `/speed 1.5`")
         val = float(m.command[1])
-        if val <= 0: return await m.reply("❌ Speed must be positive.")
+        if val <= 0.1: return await m.reply("❌ Speed must be > 0.1")
         sess = await get_session(m.from_user.id)
         sess.speed_factor = val
-        await m.reply(f"🚀 **Speed Set to {val}x**")
-    except: await m.reply("❌ Invalid number.")
+        await m.reply(f"🚀 **Speed Factor set to: {val}x**")
+    except ValueError:
+        await m.reply("❌ Invalid number.")
 
-@app.on_message(filters.command("scale") & authorized_only)
-async def set_scale(_, m):
-    try:
-        if len(m.command) != 2: return await m.reply("Usage: `/scale 1.1`")
-        val = float(m.command[1])
-        if val <= 0: return await m.reply("❌ Scale must be positive.")
-        sess = await get_session(m.from_user.id)
-        sess.watermark_scale = val
-        await m.reply(f"🔎 **Watermark Scale Set to {val}x**")
-    except: await m.reply("❌ Invalid number.")
-
-@app.on_message(filters.command(["res", "resolution"]) & authorized_only)
+@app.on_message(filters.command("res") & authorized_only)
 async def set_res(_, m):
+    sess = await get_session(m.from_user.id)
     try:
-        if len(m.command) != 2: return await m.reply("Usage: `/res 720` (480, 720, 1080)")
+        if len(m.command) != 2: return await m.reply("Usage: `/res 720`")
         val = int(m.command[1])
-        if val < 144: return await m.reply("❌ Resolution too low.")
-        sess = await get_session(m.from_user.id)
+        if val < 144 or val > 2160: return await m.reply("❌ Range: 144 - 2160")
         sess.resolution = val
-        await m.reply(f"📺 **Resolution Set to {val}p**")
+        await m.reply(f"🖥 **Resolution set to: {val}p**")
     except: await m.reply("❌ Invalid number.")
 
 @app.on_message(filters.command("crf") & authorized_only)
 async def set_crf(_, m):
+    sess = await get_session(m.from_user.id)
     try:
-        if len(m.command) != 2: return await m.reply("Usage: `/crf 23` (0-51, Lower is better quality)")
+        if len(m.command) != 2: return await m.reply("Usage: `/crf 23`")
         val = int(m.command[1])
-        if not (0 <= val <= 51): return await m.reply("❌ CRF must be 0-51.")
-        sess = await get_session(m.from_user.id)
+        if val < 0 or val > 51: return await m.reply("❌ Range: 0 (Lossless) - 51 (Worst)")
         sess.crf = val
-        await m.reply(f"🎨 **CRF Set to {val}**")
+        await m.reply(f"🎨 **Quality (CRF) set to: {val}**")
+    except: await m.reply("❌ Invalid number.")
+
+@app.on_message(filters.command("scale") & authorized_only)
+async def set_scale(_, m):
+    sess = await get_session(m.from_user.id)
+    try:
+        if len(m.command) != 2: return await m.reply("Usage: `/scale 1.2`")
+        val = float(m.command[1])
+        if val < 0.1 or val > 5.0: return await m.reply("❌ Range: 0.1 - 5.0")
+        sess.watermark_scale = val
+        await m.reply(f"🔍 **Watermark Scale set to: {val}x**")
     except: await m.reply("❌ Invalid number.")
 
 @app.on_message(filters.command("reset") & authorized_only)
@@ -585,17 +602,20 @@ async def text_handler(_, m):
     sess = await get_session(m.from_user.id)
     if sess.step == "waiting_text":
         if sess.watermark_mode == "dual":
-            if "|" not in m.text:
-                return await m.reply("❌ Error: For Dual Mode, separate texts with `|`\nExample: `Static | Moving`")
-            parts = m.text.split("|", 1)
-            sess.watermark_text = parts[0].strip()
-            sess.second_watermark_text = parts[1].strip()
+            # For Dual, user only inputs the Moving text
+            sess.watermark_text = FIXED_STATIC_TEXT
+            sess.second_watermark_text = m.text.strip()
             sess.step = "waiting_media"
-            await m.reply(f"✅ **Dual Text Set!**\nStatic: `{sess.watermark_text}`\nMoving: `{sess.second_watermark_text}`\nNow send video.")
-        else:
+            await m.reply(f"✅ **Dual Text Set!**\nStatic (Locked): `{sess.watermark_text}`\nMoving: `{sess.second_watermark_text}`\nNow send video.")
+        elif sess.watermark_mode == "random":
+             # For Random, user inputs text
             sess.watermark_text = m.text[:50]
             sess.step = "waiting_media"
             await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
+        else:
+            # For Static/Slide modes, text is already locked. 
+            # This block might not be reached if step was skipped in command
+            await m.reply(f"⚠️ Text is locked to `{FIXED_STATIC_TEXT}` for this mode. Send video.")
 
 @app.on_message((filters.video | filters.document) & filters.private & authorized_only)
 async def media_handler(c, m):
