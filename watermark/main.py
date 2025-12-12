@@ -183,12 +183,9 @@ def create_watermark(text: str, style: str = "static"):
         draw.text(((w - t_w)//2, (h - t_h)//2 - y_off), text, font=font, fill=(255, 0, 0, 255))
         return img
 
-def make_even(n):
-    """FFmpeg requires dimensions divisible by 2"""
-    return int(n) if int(n) % 2 == 0 else int(n) + 1
-
-# ==================== VIDEO PROCESSING ====================
+# ==================== VIDEO PROCESSING (FIXED) ====================
 async def get_video_info(path):
+    # Probing the video to get width/height/duration
     cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", path]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, _ = await proc.communicate()
@@ -205,39 +202,44 @@ async def process_video(in_path, out_path, sess, status_msg):
     
     try:
         vw, vh, dur = await get_video_info(in_path)
+        
+        # SAFETY CHECK: If video analysis failed, stop here
+        if vw == 0 or vh == 0:
+            logger.error("❌ FFprobe failed to detect video dimensions.")
+            return False
         if dur == 0: dur = 1
         
         inputs = ["-i", in_path]
         filter_parts = []
         
-        # Scale Base Video
+        # Scale Base Video to output resolution (must be even)
         res = make_even(sess.resolution)
         filter_parts.append(f"[0:v]scale=-2:{res}[bg]")
         curr = "[bg]"
         
         # --- PREPARE IMAGES ---
         
-        # 1. Static Image (If needed)
+        # 1. Static Image Logic
         if sess.watermark_mode in ["static", "dual"]:
             raw_s = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, "static")
-            # Logic: Resolution / 18 (Preserved)
             h_s = make_even(res / 18)
+            # Prevent 0px height crash
+            h_s = max(2, h_s) 
             w_s = make_even(h_s * (raw_s.width / raw_s.height))
             img_s = await asyncio.to_thread(raw_s.resize, (w_s, h_s), RESAMPLE_MODE)
             await asyncio.to_thread(img_s.save, wm_s_path)
             inputs.extend(["-i", wm_s_path])
 
-        # 2. Moving Image (If needed)
-        if sess.watermark_mode in ["moving", "dual"]:
-            # Default text if empty
+        # 2. Moving Image Logic (Handles 'moving' AND 'lissajous')
+        if sess.watermark_mode in ["moving", "lissajous", "dual"]:
             txt = sess.watermark_text if sess.watermark_text else "Watermark"
             raw_m = await asyncio.to_thread(create_watermark, txt, "moving")
             
             if sess.custom_size:
                 w_m, h_m = sess.custom_size
             else:
-                # Logic: (Resolution / 25) * Scale Factor
                 h_m = make_even((res / 25) * sess.scale)
+                h_m = max(2, h_m) # Safety
                 w_m = make_even(h_m * (raw_m.width / raw_m.height))
             
             img_m = await asyncio.to_thread(raw_m.resize, (w_m, h_m), RESAMPLE_MODE)
@@ -246,28 +248,22 @@ async def process_video(in_path, out_path, sess, status_msg):
 
         # --- BUILD FILTER CHAIN ---
         sp = sess.speed
-        
-        # Lissajous Math: X=A*sin(at), Y=B*cos(bt) (Figure 8 pattern)
-        # We use slightly offset frequencies (1.0 * speed) and (2.2 * speed) to cover area
         lissa_cmd = f"x='(W-w)/2 + (W-w)/3*sin(t*{sp})':y='(H-h)/2 + (H-h)/3*cos(t*{sp}*2.2)'"
         static_cmd = "x=W-w-20:y=H-h-20"
 
         if sess.watermark_mode == "static":
-            # Input 1 is Static
             filter_parts.append(f"{curr}[1:v]overlay={static_cmd}")
             
-        elif sess.watermark_mode == "moving":
-            # Input 1 is Moving
+        elif sess.watermark_mode in ["moving", "lissajous"]:
             filter_parts.append(f"{curr}[1:v]overlay={lissa_cmd}")
             
         elif sess.watermark_mode == "dual":
-            # Input 1 is Static, Input 2 is Moving
-            # 1. Apply Static
+            # Input 1 (Static) -> [v1]
             filter_parts.append(f"{curr}[1:v]overlay={static_cmd}[v1]")
-            # 2. Apply Moving
+            # Input 2 (Moving) on [v1] -> Out
             filter_parts.append(f"[v1][2:v]overlay={lissa_cmd}")
 
-        # --- EXECUTE ---
+        # --- EXECUTE FFMPEG ---
         cmd = ["ffmpeg", "-y"] + inputs + [
             "-filter_complex", ";".join(filter_parts),
             "-map", "0:a?", "-c:v", sess.codec, "-preset", "fast",
@@ -287,8 +283,13 @@ async def process_video(in_path, out_path, sess, status_msg):
         while True:
             chunk = await proc.stderr.read(4096)
             if not chunk: break
+            # Capture Progress
             try:
                 line = chunk.decode('utf-8', 'ignore')
+                # Print errors to logs for debugging
+                if "Error" in line or "Invalid" in line:
+                    logger.error(f"FFmpeg Output: {line.strip()}")
+                    
                 if "time=" in line:
                     tm = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line)
                     if tm:
@@ -296,16 +297,22 @@ async def process_video(in_path, out_path, sess, status_msg):
             except: pass
         
         await proc.wait()
-        return os.path.exists(out_path) and os.path.getsize(out_path) > 100
+        
+        # Verification
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+            return True
+        else:
+            logger.error("❌ Output file not found or empty.")
+            return False
         
     except Exception as e:
-        logger.error(f"Proc Error: {e}")
+        logger.error(f"Process Exception: {e}")
         return False
     finally:
         if os.path.exists(wm_s_path): os.remove(wm_s_path)
         if os.path.exists(wm_m_path): os.remove(wm_m_path)
 
-# ==================== HANDLERS ====================
+# ==================== HANDLERS & MAIN ====================
 app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- CONFIG COMMANDS ---
@@ -373,7 +380,7 @@ async def set_size(_, m):
 @app.on_message(filters.command("start"))
 async def start(_, m):
     await m.reply(
-        "**Watermark Bot v7.0 (Lissajous)**\n"
+        "**Watermark Bot v7.1 (Fix)**\n"
         "1. `/dual` - Static + Moving\n"
         "2. `/moving` - Moving Only (Red, Lissajous)\n"
         "3. `/ws` - Static Only\n"
@@ -385,13 +392,14 @@ async def dual_mode(c, m):
     s = await get_session(m.from_user.id)
     s.reset()
     s.watermark_mode = "dual"
-    await m.reply("✨ **Dual Mode**\nSend text for the moving watermark:")
+    await m.reply("✨ **Dual Mode Activated**\nStatic: Locked\nSend text for the **Moving Red Watermark**:")
 
-@app.on_message(filters.command("moving") & authorized_only)
+@app.on_message(filters.command(["lissajous", "moving"]) & authorized_only)
 async def moving_mode(c, m):
     s = await get_session(m.from_user.id)
     s.reset()
-    s.watermark_mode = "moving"
+    # Normalize to 'moving' so the processor understands it
+    s.watermark_mode = "moving" 
     await m.reply("🔴 **Moving Mode** (Lissajous)\nSend text:")
 
 @app.on_message(filters.command("ws") & authorized_only)
@@ -401,6 +409,11 @@ async def static_mode(c, m):
     s.watermark_mode = "static"
     await m.reply(f"📍 **Static Mode**\nLocked to `{FIXED_STATIC_TEXT}`\nSend video now.")
     s.step = "waiting_media"
+
+@app.on_message(filters.command("settings") & authorized_only)
+async def view_settings(_, m):
+    s = await get_session(m.from_user.id)
+    await m.reply(f"**Config**\nMode: `{s.watermark_mode}`\nSpeed: `{s.speed}`\nScale: `{s.scale}`\nRes: `{s.resolution}p`")
 
 @app.on_message(filters.text & filters.private & authorized_only)
 async def get_text(_, m):
@@ -431,14 +444,19 @@ async def worker(uid):
             try:
                 if not await app.download_media(msg, file_name=dl): continue
                 await st.edit("⏳ Encoding...")
-                if await process_video(dl, out, s, st):
+                
+                # Run Processing
+                success = await process_video(dl, out, s, st)
+                
+                if success:
                     th = s.custom_thumb_path or f"{dl}.jpg"
                     if not s.custom_thumb_path:
                         await asyncio.create_subprocess_exec("ffmpeg","-i",out,"-ss","2","-vframes","1",th)
                     await st.edit("📤 Uploading...")
                     await app.send_video(uid, out, caption="✅ Done", thumb=th if os.path.exists(th) else None)
                     if not s.custom_thumb_path and os.path.exists(th): os.remove(th)
-                else: await st.edit("❌ Failed")
+                else:
+                    await st.edit("❌ Encoding Failed\n(Check Logs)")
             finally:
                 if os.path.exists(dl): os.remove(dl)
                 if os.path.exists(out): os.remove(out)
@@ -451,4 +469,3 @@ if __name__ == "__main__":
     print("Bot Running")
     idle()
     app.stop()
-
