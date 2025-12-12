@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Speed Control Added
+# Async Watermark Bot – Red Text Update
 
 import os
 import re
@@ -90,7 +90,6 @@ class UserSession:
     custom_thumb_path: str = None 
     codec: str = "libx265"
     custom_size: Optional[Tuple[int, int]] = None
-    # New: Animation Speed Factor (1.0 = Normal, 2.0 = 2x Fast, 0.5 = Slow)
     speed_factor: float = 1.0
 
     def reset(self):
@@ -150,6 +149,8 @@ def create_watermark(text: str, no_bg: bool = False):
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
+    # We keep the padding calculation for both modes
+    # This ensures the 'random' text scales to the same visual size as the 'static' text
     px, py = 40, 20
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -159,9 +160,11 @@ def create_watermark(text: str, no_bg: bool = False):
     draw = ImageDraw.Draw(img)
     
     if no_bg:
-        # Outline for visibility without BG box
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 200), stroke_width=3, stroke_fill=(0, 0, 0, 200))
+        # Red Text, No Background, No Stroke
+        # We draw it centered in the padded area so scaling logic remains consistent
+        draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
     else:
+        # Standard: Black Pill, White Text
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
         
@@ -197,23 +200,18 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         wm = await asyncio.to_thread(wm_full.resize, (target_wm_width, target_wm_height), RESAMPLE_MODE)
         await asyncio.to_thread(wm.save, wm_path)
         
-        # --- MOVEMENT LOGIC WITH SPEED CONTROL ---
+        # --- POSITIONING LOGIC ---
         if sess.watermark_mode == "random":
-            # Speed logic: divide divisors by speed_factor
-            # Faster speed = Smaller divisors = Faster oscillation
             div_x = 3.7 / sess.speed_factor
             div_y = 2.3 / sess.speed_factor
-            
-            # Lissajous Curve (Smooth Random)
             overlay_cmd = f"x='(W-w)/2+(W-w)/2*sin(t/{div_x})':y='(H-h)/2+(H-h)/2*cos(t/{div_y})'"
             
         elif sess.watermark_mode == "slide" or sess.watermark_mode == "animated":
-             # Slide Logic: 30s is default cycle
              cycle_duration = 30.0 / sess.speed_factor
-             overlay_cmd = f"x='-w+((W+w)*((mod(t,{cycle_duration}))/{cycle_duration}))':y=H-h-20"
+             overlay_cmd = f"x='-w+((W+w)*((mod(t,{cycle_duration}))/{cycle_duration}))':y=H-h"
+        
         else:
-             # Static
-             overlay_cmd = "x=W-w-20:y=H-h-20"
+             overlay_cmd = "x=W-w:y=H-h"
         
         filter_complex = f"[0:v]scale=-2:{sess.resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
         
@@ -351,11 +349,11 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v8.0 (Speed Control)**\n"
+        "**👋 Watermark Bot v9.5 (Red Text)**\n"
         "1. `/ws` - Static Watermark\n"
         "2. `/w` - Animated Slide\n"
-        "3. `/wr` - **Random Moving Text**\n"
-        "4. `/speed <x>` - Set Animation Speed (0.5, 1, 2, 3)\n"
+        "3. `/wr` - **Red Moving Text** (No BG)\n"
+        "4. `/speed <x>` - Animation Speed\n"
         "5. `/size x y` - Custom Size\n"
         "6. `/settings` - View Config"
     )
@@ -389,7 +387,7 @@ async def set_random(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "random"
-    await m.reply("🔀 **Random Moving Text Mode**\n(No Background Box)\nSend the watermark text:")
+    await m.reply("🟥 **Red Moving Text Mode**\n(No BG, No Stroke)\nSend the watermark text:")
 
 @app.on_message(filters.command("speed") & authorized_only)
 async def set_speed(_, m):
