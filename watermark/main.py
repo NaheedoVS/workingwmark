@@ -147,8 +147,16 @@ def create_watermark(text: str, style: str = "static"):
     font_size = 80
     font = ImageFont.load_default()
     
-    # Try loading custom fonts
-    for p in [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf"]:
+    # SEPARATE FONTS: Use Bold list for Static, Normal list for Moving
+    if style == "static":
+        # Code 1 List (Forces Bold/Thick on Linux)
+        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+    else:
+        # Code 2 List (Your original Moving watermark fonts)
+        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf"]
+
+    # Load the font based on the list selected above
+    for p in search_paths:
         if os.path.exists(p):
             try: 
                 font = ImageFont.truetype(p, font_size)
@@ -164,20 +172,20 @@ def create_watermark(text: str, style: str = "static"):
     text_h = bbox[3] - bbox[1]
 
     if style == "static":
-        # === STATIC: ORIGINAL PILL SHAPE (UNTOUCHED) ===
+        # === STATIC: ORIGINAL PILL SHAPE ===
         px, py = 40, 20
         w, h = text_w + px, text_h + py
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        # Black Pill Box + White Text
+        # Black Pill Box + White Text (Uses Bold Font)
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
         return img
 
     else:
         # === MOVING: RED TEXT ONLY (NO BOX) ===
-        # Small padding just to prevent clipping, but no visible box
+        # Uses Code 2 Font List (Standard/Thin)
         px, py = 10, 10
         w, h = text_w + px, text_h + py
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -186,7 +194,7 @@ def create_watermark(text: str, style: str = "static"):
         # Pure Red Text
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
         return img
-
+    
 
 # ==================== PROCESSOR ====================
 async def get_video_info(path):
