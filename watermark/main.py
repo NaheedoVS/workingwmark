@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Dual Mode & Lissajous
-# 1. Static: Preserved (Res/18, Pill Shape, Black Box)
-# 2. Moving: Red Text Only, Lissajous Animation
-# 3. Dual: Both active simultaneously
+# Async Watermark Bot – Size Logic from Code 1 (Res/18)
 
 import os
+import re
 import time
-import math
 import json
 import asyncio
 import logging
 import random
-import re
+import urllib.request
 from dataclasses import dataclass, field
-from typing import List, Set, Tuple, Optional
+from typing import List, Set
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
@@ -28,9 +25,9 @@ WORK_DIR = "downloads"
 AUTH_FILE = "auth_users.json"
 
 # === TUNING ===
-UPDATE_INTERVAL = 120 
-FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan2"
-FIXED_STATIC_TEXT = "🦋Vaiᡣ𐭩Su" 
+UPDATE_INTERVAL = 120  # Updates progress every 2 minutes
+
+FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan"
 
 os.makedirs(WORK_DIR, exist_ok=True)
 logging.basicConfig(
@@ -40,6 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== GLOBAL CONSTANTS ====================
+# Define Resampling Mode compatibility for older/newer Pillow versions
 RESAMPLE_MODE = getattr(Image, "Resampling", Image).LANCZOS if hasattr(Image, "Resampling") else Image.ANTIALIAS
 
 # ==================== AUTH MANAGER ====================
@@ -67,39 +65,35 @@ async def check_auth_func(_, __, message: Message):
 authorized_only = filters.create(check_auth_func)
 
 # ==================== RESOURCES ====================
-# Expects a font file in the root directory or downloads a fallback
-FONT_PATH = "arial.ttf" 
+FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
 
 def check_resources():
     if not os.path.exists(FONT_PATH):
-        print(f"⚠️ Local font '{FONT_PATH}' not found. Watermarks might look generic.")
-    else:
-        print(f"✅ Found font: {FONT_PATH}")
+        try:
+            opener = urllib.request.build_opener()
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+            urllib.request.install_opener(opener)
+            urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+        except: pass
+
+def get_font(size):
+    try: return ImageFont.truetype(FONT_PATH, size)
+    except: return ImageFont.load_default()
 
 # ==================== SESSION MANAGER ====================
 @dataclass
 class UserSession:
     user_id: int
     step: str = "idle"
-    
-    # Watermark Data
-    watermark_text: str = ""        # For Moving
-    watermark_mode: str = "static"  # static, moving, dual
-    
-    # Video Settings
-    crf: int = 23
-    resolution: int = 720
-    codec: str = "libx265"
-    custom_thumb_path: str = None 
-    
-    # Animation Settings
-    speed: float = 1.0              # Speed multiplier
-    scale: float = 1.0              # Size multiplier for moving text
-    custom_size: Optional[Tuple[int, int]] = None # (W, H) override
-    
-    # System
+    watermark_text: str = ""
+    watermark_mode: str = "static" 
     queue: List[Message] = field(default_factory=list)
     is_processing: bool = False
+    crf: int = 23
+    resolution: int = 720
+    custom_thumb_path: str = None 
+    codec: str = "libx265"
 
     def reset(self):
         self.step = "waiting_text"
@@ -111,7 +105,7 @@ session_manager = {}
 async def get_session(uid: int) -> UserSession:
     return session_manager.setdefault(uid, UserSession(uid))
 
-# ==================== PROGRESS HELPERS ====================
+# ==================== HELPERS ====================
 def time_to_seconds(time_str):
     try:
         h, m, s = time_str.split(':')
@@ -125,355 +119,408 @@ def render_bar(current, total):
     filled = pct // 10
     return f"[{'█' * filled}{'░' * (10 - filled)}] {pct}%"
 
+# ==================== SAFE EDIT (FLOOD PROTECTION) ====================
 async def safe_edit(msg, text, timer_ref):
     now = time.time()
-    if (now - timer_ref[0]) < UPDATE_INTERVAL: return 
+    
+    # Check 1: Time Interval (2 minutes)
+    if (now - timer_ref[0]) < UPDATE_INTERVAL:
+        return 
+
     try:
         await msg.edit_text(text)
         timer_ref[0] = now
     except FloodWait as e:
+        logger.warning(f"FloodWait hit! Sleeping updates for {e.value}s")
         timer_ref[0] = now + e.value + 10
-    except MessageNotModified: pass
-    except Exception: pass
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.error(f"Edit failed: {e}")
 
+# ==================== DOWNLOAD PROGRESS ====================
 async def download_progress(current, total, status_msg, start_time, last_update_ref):
-    if current == total: pass
-    elif (time.time() - last_update_ref[0]) < UPDATE_INTERVAL: return
+    if current == total:
+        pass
+    elif (time.time() - last_update_ref[0]) < UPDATE_INTERVAL:
+        return
+
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK GENERATION ====================
-def create_watermark(text: str, style: str = "static"):
+# ==================== WATERMARK LOGIC (From Code 1) ====================
+def create_watermark(text: str):
+    # Generates a high-quality base image (Font Size 80)
+    # This will be resized later based on resolution
     font_size = 80
     font = ImageFont.load_default()
-    if os.path.exists(FONT_PATH):
-        try: font = ImageFont.truetype(FONT_PATH, font_size)
-        except: pass
+    
+    # Try loading custom fonts
+    for p in [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]:
+        if os.path.exists(p):
+            try: 
+                font = ImageFont.truetype(p, font_size)
+                break
+            except: continue
 
     dummy = Image.new("RGBA", (1, 1))
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    t_w = bbox[2] - bbox[0]
-    t_h = bbox[3] - bbox[1]
-    y_off = bbox[1]
+    # Padding settings from Code 1
+    px, py = 40, 20
+    w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+    
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    
+    # Draw pill shape
+    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
+    draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
+    return img
 
-    if style == "static":
-        # === 1. STATIC: PILL SHAPE, BLACK BOX (Unchanged) ===
-        px, py = 40, 20
-        w, h = t_w + px, t_h + py
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        # Black Pill Box
-        draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        
-        # White Text
-        draw.text(((w - t_w)//2, (h - t_h)//2 - y_off), text, font=font, fill="white")
-        return img
-
-    else:
-        # === 2. MOVING: RED TEXT, NO BOX (New) ===
-        px, py = 10, 10 # Minimal padding
-        w, h = t_w + px, t_h + py
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        # Red Text Only (#FF0000)
-        draw.text(((w - t_w)//2, (h - t_h)//2 - y_off), text, font=font, fill=(255, 0, 0, 255))
-        return img
-
-# ==================== VIDEO PROCESSING (FIXED) ====================
-# ==================== VIDEO PROCESSING (DEBUG MODE) ====================
+# ==================== PROCESSOR ====================
 async def get_video_info(path):
-    # Debug: Check if file exists
-    if not os.path.exists(path):
-        logger.error(f"❌ File not found: {path}")
-        return 0, 0, 0
-        
+    cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", path]
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, _ = await process.communicate()
     try:
-        # Run ffprobe
-        cmd = [
-            "ffprobe", 
-            "-v", "error", 
-            "-select_streams", "v:0", 
-            "-show_entries", "stream=width,height,duration", 
-            "-of", "json", 
-            path
-        ]
-        
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, 
-            stdout=asyncio.subprocess.PIPE, 
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        
-        if proc.returncode != 0:
-            logger.error(f"❌ FFprobe Error: {stderr.decode()}")
-            return 0, 0, 0
-            
-        data = json.loads(stdout)
-        stream = data["streams"][0]
-        return int(stream["width"]), int(stream["height"]), float(stream.get("duration", 0))
-        
-    except FileNotFoundError:
-        logger.error("❌ FFmpeg/FFprobe is NOT installed on this server!")
-        return 0, 0, 0
-    except Exception as e:
-        logger.error(f"❌ Info Error: {e}")
-        return 0, 0, 0
+        meta = json.loads(stdout)
+        stream = meta["streams"][0]
+        return int(stream.get("width", 0)), int(stream.get("height", 0)), float(stream.get("duration", 0))
+    except: return 0, 0, 0
 
-async def process_video(in_path, out_path, sess, status_msg):
-    pid = os.getpid()
-    ts = int(time.time())
-    wm_s_path = f"{WORK_DIR}/wm_static_{ts}_{pid}.png"
-    wm_m_path = f"{WORK_DIR}/wm_moving_{ts}_{pid}.png"
+async def process_video(in_path, text, out_path, crf, resolution, codec, status_msg, mode="static"):
+    wm_path = f"{WORK_DIR}/wm_{int(time.time())}_{os.getpid()}.png"
     
     try:
-        vw, vh, dur = await get_video_info(in_path)
+        in_w, in_h, duration = await get_video_info(in_path)
+        if duration == 0: duration = 1 
         
-        if vw == 0 or vh == 0:
-            # If this hits, check your logs for the specific error from get_video_info
-            return False
+        # --- WATERMARK SIZING LOGIC FROM CODE 1 ---
+        # 1. Generate High-Res Watermark
+        wm_full = await asyncio.to_thread(create_watermark, text)
         
-        if dur == 0: dur = 1
+        # 2. Calculate Target Height (Resolution / 18)
+        target_wm_height = int(resolution / 18)
         
-        inputs = ["-i", in_path]
-        filter_parts = []
+        # 3. Calculate Target Width (Aspect Ratio)
+        target_wm_width = int(target_wm_height * (wm_full.width / wm_full.height))
         
-        # Scale Base Video
-        res = make_even(sess.resolution)
-        filter_parts.append(f"[0:v]scale=-2:{res}[bg]")
-        curr = "[bg]"
+        # 4. Resize using High Quality Resampling
+        wm = await asyncio.to_thread(wm_full.resize, (target_wm_width, target_wm_height), RESAMPLE_MODE)
+        await asyncio.to_thread(wm.save, wm_path)
         
-        # --- IMAGES ---
-        if sess.watermark_mode in ["static", "dual"]:
-            raw_s = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, "static")
-            h_s = max(2, make_even(res / 18))
-            w_s = make_even(h_s * (raw_s.width / raw_s.height))
-            img_s = await asyncio.to_thread(raw_s.resize, (w_s, h_s), RESAMPLE_MODE)
-            await asyncio.to_thread(img_s.save, wm_s_path)
-            inputs.extend(["-i", wm_s_path])
-
-        if sess.watermark_mode in ["moving", "lissajous", "dual"]:
-            txt = sess.watermark_text if sess.watermark_text else "Watermark"
-            raw_m = await asyncio.to_thread(create_watermark, txt, "moving")
-            
-            if sess.custom_size:
-                w_m, h_m = sess.custom_size
-            else:
-                h_m = max(2, make_even((res / 25) * sess.scale))
-                w_m = make_even(h_m * (raw_m.width / raw_m.height))
-            
-            img_m = await asyncio.to_thread(raw_m.resize, (w_m, h_m), RESAMPLE_MODE)
-            await asyncio.to_thread(img_m.save, wm_m_path)
-            inputs.extend(["-i", wm_m_path])
-
-        # --- FILTERS ---
-        sp = sess.speed
-        lissa_cmd = f"x='(W-w)/2 + (W-w)/3*sin(t*{sp})':y='(H-h)/2 + (H-h)/3*cos(t*{sp}*2.2)'"
-        static_cmd = "x=W-w-20:y=H-h-20"
-
-        if sess.watermark_mode == "static":
-            filter_parts.append(f"{curr}[1:v]overlay={static_cmd}")
-        elif sess.watermark_mode in ["moving", "lissajous"]:
-            filter_parts.append(f"{curr}[1:v]overlay={lissa_cmd}")
-        elif sess.watermark_mode == "dual":
-            filter_parts.append(f"{curr}[1:v]overlay={static_cmd}[v1]")
-            filter_parts.append(f"[v1][2:v]overlay={lissa_cmd}")
-
-        cmd = ["ffmpeg", "-y"] + inputs + [
-            "-filter_complex", ";".join(filter_parts),
-            "-map", "0:a?", "-c:v", sess.codec, "-preset", "fast",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"
-        ]
-        
-        if sess.codec == "libx265":
-            cmd.extend(["-crf", str(sess.crf + 4), "-tag:v", "hvc1"])
+        # 5. Overlay Logic
+        # Static: Bottom Right with 20px padding
+        # Animated: Slide logic
+        if mode == "slide" or mode == "animated":
+             # Note: Code 1 used a specific slide formula
+             overlay_cmd = "x='-w+((W+w)*((mod(t,30))/30))':y=H-h-20"
         else:
-            cmd.extend(["-crf", str(sess.crf), "-pix_fmt", "yuv420p"])
-            
-        cmd.append(out_path)
+             # Static
+             overlay_cmd = "x=W-w-20:y=H-h-20"
         
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        last_upd = [0]
+        filter_complex = f"[0:v]scale=-2:{resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
+        
+        cmd_args = [
+            "ffmpeg", "-y", "-i", in_path, "-i", wm_path, "-filter_complex", filter_complex,
+            "-map", "0:a?", 
+            "-c:v", codec,             
+            "-preset", "fast",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart"
+        ]
+
+        if codec == "libx265":
+            hevc_crf = int(crf) + 4
+            cmd_args.extend(["-crf", str(hevc_crf)])
+            cmd_args.extend(["-tag:v", "hvc1"]) 
+        else:
+            cmd_args.extend(["-crf", str(crf)])
+            cmd_args.extend(["-pix_fmt", "yuv420p"]) 
+
+        cmd_args.append(out_path)
+
+        process = await asyncio.create_subprocess_exec(*cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        
+        last_update_time = [0]
         
         while True:
-            chunk = await proc.stderr.read(4096)
+            chunk = await process.stderr.read(4096)
             if not chunk: break
-            try:
-                line = chunk.decode('utf-8', 'ignore')
-                if "time=" in line:
-                    tm = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", line)
-                    if tm:
-                        await safe_edit(status_msg, f"⚙️ **Encoding...**\n{render_bar(time_to_seconds(tm.group(1)), dur)}", last_upd)
-            except: pass
+            
+            chunk_str = chunk.decode('utf-8', errors='ignore')
+            
+            if "time=" in chunk_str:
+                time_match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d+)", chunk_str)
+                if time_match:
+                    codec_name = "HEVC" if codec == "libx265" else "AVC"
+                    text = f"⚙️ **Processing ({codec_name})...**\n{render_bar(time_to_seconds(time_match.group(1)), duration)}"
+                    await safe_edit(status_msg, text, last_update_time)
         
-        await proc.wait()
-        return os.path.exists(out_path) and os.path.getsize(out_path) > 100
-        
+        await process.wait()
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 1024
     except Exception as e:
-        logger.error(f"Proc Error: {e}")
+        logger.error(f"FFmpeg Error: {e}")
         return False
     finally:
-        if os.path.exists(wm_s_path): os.remove(wm_s_path)
-        if os.path.exists(wm_m_path): os.remove(wm_m_path)
+        if os.path.exists(wm_path): os.remove(wm_path)
 
-# ==================== HANDLERS & MAIN ====================
+async def generate_thumbnail(video_path):
+    thumb_path = f"{video_path}.jpg"
+    cmd = ["ffmpeg", "-y", "-i", video_path, "-ss", "00:00:02", "-vframes", "1", "-vf", "scale=320:-1", thumb_path]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    await proc.wait()
+    return thumb_path if os.path.exists(thumb_path) else None
+
+async def worker(uid):
+    sess = await get_session(uid)
+    if sess.is_processing: return
+    sess.is_processing = True
+    
+    try:
+        while sess.queue:
+            message_to_process = sess.queue.pop(0)
+            
+            file = message_to_process.video or message_to_process.document
+            original_caption = message_to_process.caption.html if message_to_process.caption else ""
+            original_name = file.file_name if file.file_name else "video.mp4"
+            
+            status_msg = await app.send_message(uid, f"⬇️ **Downloading next video...**")
+            dl_path = os.path.join(WORK_DIR, f"in_{uid}_{int(time.time())}.mp4")
+            
+            try:
+                last_update_time = [0]
+
+                in_path = await app.download_media(
+                    message_to_process, 
+                    file_name=dl_path, 
+                    progress=download_progress, 
+                    progress_args=(status_msg, time.time(), last_update_time) 
+                )
+                
+                if not in_path:
+                    await status_msg.edit("❌ Download Failed.")
+                    continue
+
+                out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
+                
+                await status_msg.edit(f"⏳ **Starting FFmpeg...**")
+                
+                success = await process_video(
+                    in_path, sess.watermark_text, out_path, sess.crf, sess.resolution, 
+                    sess.codec, status_msg, mode=sess.watermark_mode
+                )
+                
+                if success:
+                    _, _, out_duration = await get_video_info(out_path)
+                    
+                    thumb = None
+                    is_custom_thumb = False
+                    
+                    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+                        thumb = sess.custom_thumb_path
+                        is_custom_thumb = True
+                    else:
+                        thumb = await generate_thumbnail(out_path)
+                        is_custom_thumb = False
+
+                    await status_msg.edit_text(f"📤 **Uploading...**")
+                    
+                    name_root, ext = os.path.splitext(original_name)
+                    final_filename = f"{name_root}{FILENAME_SUFFIX}{ext}"
+                    final_caption = original_caption if original_caption else f"✅ **Done**"
+
+                    await app.send_video(
+                        uid, 
+                        out_path, 
+                        caption=final_caption, 
+                        thumb=thumb, 
+                        file_name=final_filename,
+                        duration=int(out_duration)
+                    )
+                    
+                    if thumb and not is_custom_thumb:
+                        os.remove(thumb)
+                else:
+                    await status_msg.edit_text("❌ Processing Failed.")
+                
+                await status_msg.delete()
+                
+                if os.path.exists(in_path): os.remove(in_path)
+                if os.path.exists(out_path): os.remove(out_path)
+
+            except Exception as e:
+                logger.error(f"Worker Error: {e}")
+                await status_msg.edit(f"❌ Error: {e}")
+                
+    finally: 
+        sess.is_processing = False
+
+# ==================== HANDLERS ====================
 app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- CONFIG COMMANDS ---
+@app.on_message(filters.command("auth") & filters.user(OWNER_ID))
+async def auth_handler(_, m):
+    if len(m.command) != 2: return await m.reply("Usage: `/auth 123456789`")
+    try:
+        new_id = int(m.command[1])
+        AUTHORIZED_USERS.add(new_id)
+        save_auth_users()
+        await m.reply(f"✅ User `{new_id}` added.")
+    except: await m.reply("❌ Invalid ID.")
+
+@app.on_message(filters.command("unauth") & filters.user(OWNER_ID))
+async def unauth_handler(_, m):
+    if len(m.command) != 2: return await m.reply("Usage: `/unauth 123456789`")
+    try:
+        rem_id = int(m.command[1])
+        if rem_id == OWNER_ID: return await m.reply("❌ Cannot ban owner.")
+        if rem_id in AUTHORIZED_USERS:
+            AUTHORIZED_USERS.remove(rem_id)
+            save_auth_users()
+            await m.reply(f"🚫 User `{rem_id}` removed.")
+        else: await m.reply("⚠️ User not in list.")
+    except: await m.reply("❌ Invalid ID.")
+
+@app.on_message(filters.command("users") & filters.user(OWNER_ID))
+async def list_users(_, m):
+    await m.reply(f"**Authorized Users:**\n" + "\n".join([f"`{uid}`" for uid in AUTHORIZED_USERS]))
+
+@app.on_message(filters.command("start"))
+async def start_handler(_, m):
+    if m.from_user.id not in AUTHORIZED_USERS:
+        return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
+    await m.reply(
+        "**👋 Watermark Bot v6.0 (Code 1 Logic Integrated)**\n"
+        "1. /ws - Static Watermark\n"
+        "2. /w - Animated Watermark\n"
+        "3. /codec 264 - Fast Mode\n"
+        "4. /codec 265 - High Compress Mode\n"
+        "5. /settings - Check current settings"
+    )
+
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
-async def set_thumb(c, m):
+async def set_thumb_handler(c, m):
     sess = await get_session(m.from_user.id)
-    photo = m.photo or (m.reply_to_message.photo if m.reply_to_message else None)
-    if not photo: return await m.reply("❌ Send/Reply to photo")
+    photo = None
+    if m.photo:
+        photo = m.photo
+    elif m.reply_to_message and m.reply_to_message.photo:
+        photo = m.reply_to_message.photo
+    else:
+        return await m.reply("❌ Send a photo with `/setthumb` or reply to a photo.")
     if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
         os.remove(sess.custom_thumb_path)
-    path = await c.download_media(photo, file_name=f"{WORK_DIR}/thumb_{m.from_user.id}.jpg")
+    path = await c.download_media(photo, file_name=os.path.join(WORK_DIR, f"thumb_{m.from_user.id}.jpg"))
     sess.custom_thumb_path = path
-    await m.reply("✅ Thumbnail Saved")
+    await m.reply("✅ **Custom Thumbnail Saved!**")
 
 @app.on_message(filters.command("clearthumb") & authorized_only)
-async def clear_thumb(_, m):
+async def clear_thumb_handler(_, m):
     sess = await get_session(m.from_user.id)
-    if sess.custom_thumb_path: os.remove(sess.custom_thumb_path)
+    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+        os.remove(sess.custom_thumb_path)
     sess.custom_thumb_path = None
-    await m.reply("🗑 Thumbnail Removed")
+    await m.reply("🗑 **Thumbnail Deleted.**")
 
-@app.on_message(filters.command("res") & authorized_only)
-async def set_res(_, m):
-    try: (await get_session(m.from_user.id)).resolution = int(m.command[1])
-    except: return await m.reply("Usage: `/res 720`")
-    await m.reply(f"📺 Res: {m.command[1]}p")
+@app.on_message(filters.command("viewthumb") & authorized_only)
+async def view_thumb_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
+        await m.reply_photo(sess.custom_thumb_path, caption="🖼 **Your Custom Thumbnail**")
+    else:
+        await m.reply("❌ You don't have a custom thumbnail set.")
 
-@app.on_message(filters.command("crf") & authorized_only)
-async def set_crf(_, m):
-    try: (await get_session(m.from_user.id)).crf = int(m.command[1])
-    except: return await m.reply("Usage: `/crf 23`")
-    await m.reply(f"🎨 CRF: {m.command[1]}")
+@app.on_message(filters.command("w") & authorized_only)
+async def set_animated(_, m):
+    sess = await get_session(m.from_user.id)
+    sess.reset()
+    sess.watermark_mode = "animated"
+    await m.reply("✨ **Animated Mode**\nSend the watermark text:")
+
+@app.on_message(filters.command("ws") & authorized_only)
+async def set_static(_, m):
+    sess = await get_session(m.from_user.id)
+    sess.reset()
+    sess.watermark_mode = "static"
+    await m.reply("📍 **Static Mode**\nSend the watermark text:")
 
 @app.on_message(filters.command("codec") & authorized_only)
 async def set_codec(_, m):
     try:
-        c = "libx265" if m.command[1] == "265" else "libx264"
-        (await get_session(m.from_user.id)).codec = c
-        await m.reply(f"💿 Codec: {c}")
-    except: await m.reply("Usage: `/codec 264` or `265`")
-
-@app.on_message(filters.command("speed") & authorized_only)
-async def set_speed(_, m):
-    try:
-        (await get_session(m.from_user.id)).speed = float(m.command[1])
-        await m.reply(f"🚀 Speed: {m.command[1]}")
-    except: await m.reply("Usage: `/speed 1.5`")
-
-@app.on_message(filters.command("scale") & authorized_only)
-async def set_scale(_, m):
-    try:
-        (await get_session(m.from_user.id)).scale = float(m.command[1])
-        await m.reply(f"🔍 Scale: {m.command[1]}")
-    except: await m.reply("Usage: `/scale 1.5`")
-
-@app.on_message(filters.command("size") & authorized_only)
-async def set_size(_, m):
-    try:
-        w, h = int(m.command[1]), int(m.command[2])
-        (await get_session(m.from_user.id)).custom_size = (w, h)
-        await m.reply(f"📏 Fixed Size: {w}x{h}")
-    except: await m.reply("Usage: `/size 200 100`")
-
-# --- MODE COMMANDS ---
-@app.on_message(filters.command("start"))
-async def start(_, m):
-    await m.reply(
-        "**Watermark Bot v7.1 (Fix)**\n"
-        "1. `/dual` - Static + Moving\n"
-        "2. `/moving` - Moving Only (Red, Lissajous)\n"
-        "3. `/ws` - Static Only\n"
-        "**Config:** `/res`, `/crf`, `/codec`, `/speed`, `/scale`, `/setthumb`"
-    )
-
-@app.on_message(filters.command("dual") & authorized_only)
-async def dual_mode(c, m):
-    s = await get_session(m.from_user.id)
-    s.reset()
-    s.watermark_mode = "dual"
-    await m.reply("✨ **Dual Mode Activated**\nStatic: Locked\nSend text for the **Moving Red Watermark**:")
-
-@app.on_message(filters.command(["lissajous", "moving"]) & authorized_only)
-async def moving_mode(c, m):
-    s = await get_session(m.from_user.id)
-    s.reset()
-    # Normalize to 'moving' so the processor understands it
-    s.watermark_mode = "moving" 
-    await m.reply("🔴 **Moving Mode** (Lissajous)\nSend text:")
-
-@app.on_message(filters.command("ws") & authorized_only)
-async def static_mode(c, m):
-    s = await get_session(m.from_user.id)
-    s.reset()
-    s.watermark_mode = "static"
-    await m.reply(f"📍 **Static Mode**\nLocked to `{FIXED_STATIC_TEXT}`\nSend video now.")
-    s.step = "waiting_media"
+        sess = await get_session(m.from_user.id)
+        arg = m.command[1] if len(m.command) > 1 else ""
+        
+        if arg == "265":
+            sess.codec = "libx265"
+            await m.reply("✅ Codec set to **H.265 (HEVC)**.\nSmaller files, slower speed.")
+        elif arg == "264":
+            sess.codec = "libx264"
+            await m.reply("✅ Codec set to **H.264 (AVC)**.\nFaster speed, standard compatibility.")
+        else:
+            await m.reply("Usage:\n`/codec 264` (Fast)\n`/codec 265` (Small Size)")
+    except: await m.reply("Error setting codec.")
 
 @app.on_message(filters.command("settings") & authorized_only)
-async def view_settings(_, m):
-    s = await get_session(m.from_user.id)
-    await m.reply(f"**Config**\nMode: `{s.watermark_mode}`\nSpeed: `{s.speed}`\nScale: `{s.scale}`\nRes: `{s.resolution}p`")
+async def settings_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    thumb_status = "✅ Set" if sess.custom_thumb_path else "❌ Auto"
+    c_name = "HEVC (H.265)" if sess.codec == "libx265" else "AVC (H.264)"
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nCodec: `{c_name}`\nCRF: {sess.crf}\nRes: {sess.resolution}p\nThumb: {thumb_status}")
+
+@app.on_message(filters.command("crf") & authorized_only)
+async def set_crf(_, m):
+    try:
+        sess = await get_session(m.from_user.id)
+        sess.crf = max(0, min(int(m.command[1]), 51))
+        await m.reply(f"✅ CRF: {sess.crf}")
+    except: await m.reply("Usage: /crf 23")
+
+@app.on_message(filters.command("res") & authorized_only)
+async def set_res(_, m):
+    try:
+        sess = await get_session(m.from_user.id)
+        sess.resolution = int(m.command[1])
+        await m.reply(f"✅ Res: {sess.resolution}p")
+    except: await m.reply("Usage: /res 720")
 
 @app.on_message(filters.text & filters.private & authorized_only)
-async def get_text(_, m):
-    s = await get_session(m.from_user.id)
-    if s.step == "waiting_text":
-        s.watermark_text = m.text
-        s.step = "waiting_media"
-        await m.reply(f"✅ Text: `{m.text}`\nNow send video.")
+async def text_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    if sess.step == "waiting_text":
+        sess.watermark_text = m.text[:50]
+        sess.step = "waiting_media"
+        await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
 
 @app.on_message((filters.video | filters.document) & filters.private & authorized_only)
-async def get_video(_, m):
-    s = await get_session(m.from_user.id)
-    if s.step != "waiting_media": return await m.reply("⚠️ Select mode first")
-    s.queue.append(m)
-    await m.reply(f"✅ Added to Queue (Pos: {len(s.queue)})")
-    asyncio.create_task(worker(m.from_user.id))
+async def media_handler(c, m):
+    sess = await get_session(m.from_user.id)
+    if sess.step != "waiting_media": return await m.reply("⚠️ Use /ws or /w first.")
+    
+    if m.document and "video" not in m.document.mime_type: return await m.reply("❌ Not a video.")
 
-async def worker(uid):
-    s = await get_session(uid)
-    if s.is_processing: return
-    s.is_processing = True
-    try:
-        while s.queue:
-            msg = s.queue.pop(0)
-            st = await app.send_message(uid, "⬇️ Downloading...")
-            dl = f"{WORK_DIR}/in_{uid}_{time.time()}.mp4"
-            out = f"{WORK_DIR}/out_{uid}_{time.time()}.mp4"
-            try:
-                if not await app.download_media(msg, file_name=dl): continue
-                await st.edit("⏳ Encoding...")
-                
-                # Run Processing
-                success = await process_video(dl, out, s, st)
-                
-                if success:
-                    th = s.custom_thumb_path or f"{dl}.jpg"
-                    if not s.custom_thumb_path:
-                        await asyncio.create_subprocess_exec("ffmpeg","-i",out,"-ss","2","-vframes","1",th)
-                    await st.edit("📤 Uploading...")
-                    await app.send_video(uid, out, caption="✅ Done", thumb=th if os.path.exists(th) else None)
-                    if not s.custom_thumb_path and os.path.exists(th): os.remove(th)
-                else:
-                    await st.edit("❌ Encoding Failed\n(Check Logs)")
-            finally:
-                if os.path.exists(dl): os.remove(dl)
-                if os.path.exists(out): os.remove(out)
-                await st.delete()
-    finally: s.is_processing = False
+    sess.queue.append(m)
+    
+    position = len(sess.queue)
+    if position == 1 and not sess.is_processing:
+        await m.reply("✅ **Added to Queue** (Starting now...)")
+    else:
+        await m.reply(f"✅ **Added to Queue** (Position: {position})")
+        
+    asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
     check_resources()
+    print("Bot is starting...")
     app.start()
-    print("Bot Running")
+    
+    try:
+        app.send_message(OWNER_ID, "Hey Vaisu welcome back")
+    except Exception as e:
+        print(f"Startup message failed: {e}")
+    
+    print("Bot is now running.")
     idle()
     app.stop()
