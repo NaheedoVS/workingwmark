@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Final Corrected Version
-# 1. Static Shape: Pill Box (Radius 20, Padding 40/20)
-# 2. Static Text: Locked to "🦋Vaiᡣ𐭩Su" (Symbola Font)
-# 3. Static Scaling: Resolution / 18
+# Async Watermark Bot – Final Fixed Version
+# 1. Font: Quivira.otf (Fixes missing symbols 🦋ᡣ𐭩)
+# 2. Static Size: Fixed 80px Height
+# 3. Static Text: Locked to "🦋Vaiᡣ𐭩Su"
 
 import os
 import re
@@ -66,13 +66,19 @@ async def check_auth_func(_, __, message: Message):
 
 authorized_only = filters.create(check_auth_func)
 
-# ==================== RESOURCES (Symbola for 🦋 and 𐭩) ====================
-FONT_URL = "https://github.com/shaunweingarten/fonts/raw/master/Symbola.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Symbola.ttf")
+# ==================== RESOURCES (FONT FIX) ====================
+# Quivira.otf supports 🦋 (Emoji), ᡣ (Mongolian), and 𐭩 (Pahlavi)
+FONT_URL = "https://github.com/jenskutilek/free-fonts/raw/master/Quivira.otf"
+FONT_PATH = os.path.join(WORK_DIR, "Quivira.otf")
 
 def check_resources():
+    # Force delete conflicting fonts to ensure new one is used
+    if os.path.exists(os.path.join(WORK_DIR, "Symbola.ttf")): 
+        try: os.remove(os.path.join(WORK_DIR, "Symbola.ttf"))
+        except: pass
+        
     if not os.path.exists(FONT_PATH):
-        print(f"⏳ Downloading Symbola Font (for 🦋 and 𐭩)...")
+        print(f"⏳ Downloading Quivira Font (for 🦋 and 𐭩)...")
         try:
             opener = urllib.request.build_opener()
             opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
@@ -81,6 +87,7 @@ def check_resources():
             print("✅ Font Downloaded.")
         except Exception as e:
             print(f"❌ Font Download Failed: {e}")
+
 
 # ==================== SESSION MANAGER ====================
 @dataclass
@@ -142,57 +149,56 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-
-# ==================== WATERMARK GENERATION (YOUR CODE) ====================
+# ==================== WATERMARK GENERATION ====================
 def create_watermark(text: str, style: str = "static"):
-    # Generates a high-quality base image (Font Size 80)
-    # This will be resized later based on resolution
     font_size = 80
     font = ImageFont.load_default()
     
-    # Try loading custom fonts (Prioritize Symbola for 🦋 and 𐭩)
-    for p in [FONT_PATH, "fonts/Symbola.ttf", "Symbola.ttf", "arialbd.ttf"]:
+    # Prioritize Quivira.otf
+    for p in [FONT_PATH, "Quivira.otf", "downloads/Quivira.otf", "arialbd.ttf"]:
         if os.path.exists(p):
             try: 
                 font = ImageFont.truetype(p, font_size)
                 break
             except: continue
 
-    # Determine Padding/Style
     if style == "static":
-        # YOUR SPECIFIC STATIC LOGIC
+        # === PILL SHAPE LOGIC (Radius 20, Padding 40/20) ===
         px, py = 40, 20
-        # Calculate size based on text
+        
         dummy = Image.new("RGBA", (1, 1))
         d = ImageDraw.Draw(dummy)
         bbox = d.textbbox((0, 0), text, font=font)
         
-        w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+        # Calculate Dimensions with Padding
+        w = bbox[2] - bbox[0] + px
+        h = bbox[3] - bbox[1] + py
         
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        # Draw pill shape (Radius 20, Black 180)
+        # Draw Box
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         
-        # Draw Text centered relative to padding
-        # Note: bbox[0] and bbox[1] offsets are needed for precise centering
+        # Draw Text (Centered)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
         x_pos = (w - text_w) // 2
-        y_pos = (h - text_h) // 2 - bbox[1] # Subtract offset to realign
+        y_pos = (h - text_h) // 2 - bbox[1] 
         
         draw.text((x_pos, y_pos), text, font=font, fill=(255, 255, 255, 255))
         return img
 
     else:
-        # MOVING STYLE (Red Text, Minimal Padding)
+        # === MOVING STYLE LOGIC ===
         px, py = 4, 4
+        
         dummy = Image.new("RGBA", (1, 1))
         d = ImageDraw.Draw(dummy)
         bbox = d.textbbox((0, 0), text, font=font)
         
-        w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+        w = bbox[2] - bbox[0] + px
+        h = bbox[3] - bbox[1] + py
         
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -204,6 +210,7 @@ def create_watermark(text: str, style: str = "static"):
         
         draw.text((x_pos, y_pos), text, font=font, fill=(255, 0, 0, 255))
         return img
+
 
 # ==================== VIDEO PROCESSING ====================
 async def get_video_info(path):
@@ -229,15 +236,16 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         
         # --- SIZE CALCULATION LOGIC ---
         def get_target_size(base_img, is_static_style=True):
-            # 1. FIXED STATIC SIZE LOGIC (Resolution / 18)
+            # 1. FIXED STATIC SIZE (80px HEIGHT)
             if is_static_style:
-                target_height = int(sess.resolution / 18) 
-                # Calculate width based on aspect ratio
+                target_height = 80  # <--- CHANGED: Always 80px
+                
+                # Keep aspect ratio
                 aspect = base_img.width / base_img.height
                 target_width = int(target_height * aspect)
                 return target_width, target_height
             
-            # 2. MOVING SIZE LOGIC (Variable Scale)
+            # 2. MOVING SIZE (Variable Scale)
             else:
                 if sess.custom_size:
                     return sess.custom_size
@@ -249,13 +257,11 @@ async def process_video(in_path, text, out_path, sess, status_msg):
                     return t_w, t_h
 
         if sess.watermark_mode == "dual":
-            # 1. Static Part (LOCKED TEXT)
             wm_static_raw = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, style="static")
             w1, h1 = get_target_size(wm_static_raw, is_static_style=True)
             wm_static = await asyncio.to_thread(wm_static_raw.resize, (w1, h1), RESAMPLE_MODE)
             await asyncio.to_thread(wm_static.save, wm_path)
 
-            # 2. Moving Part (User Text - Red)
             wm_move_raw = await asyncio.to_thread(create_watermark, sess.second_watermark_text, style="moving")
             w2, h2 = get_target_size(wm_move_raw, is_static_style=False)
             wm_move = await asyncio.to_thread(wm_move_raw.resize, (w2, h2), RESAMPLE_MODE)
@@ -272,19 +278,15 @@ async def process_video(in_path, text, out_path, sess, status_msg):
             inputs = ["-i", in_path, "-i", wm_path, "-i", wm2_path]
 
         else:
-            # Single Mode
             if sess.watermark_mode == "random":
-                # Moving Mode -> Use User Text
                 style = "moving"
                 is_static = False
                 wm_text_to_use = text
             elif sess.watermark_mode == "static":
-                # Static Mode -> FORCE FIXED TEXT
                 style = "static"
                 is_static = True
                 wm_text_to_use = FIXED_STATIC_TEXT
             else:
-                # Animated/Slide Mode
                 style = "static" 
                 is_static = True
                 wm_text_to_use = FIXED_STATIC_TEXT
@@ -413,6 +415,8 @@ async def worker(uid):
                 await status_msg.edit(f"❌ Error: {e}")
     finally: sess.is_processing = False
 
+
+
 # ==================== HANDLERS ====================
 app = Client("WatermarkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -444,7 +448,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot vFinal (Symbola Fix)**\n"
+        "**👋 Watermark Bot vFinal (Quivira + 80px)**\n"
         "**Modes:**\n"
         "1. `/dual` - Static (Locked) + Moving\n"
         "2. `/ws` - Static Mode (Locked Text)\n"
