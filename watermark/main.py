@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Final Combined
-# Features: 
-# 1. Static Text ALWAYS "🦋Vaiᡣ𐭩Su"
-# 2. Static Size = Resolution / 18 (From Code 2)
-# 3. Moving Logic = Variable/Scaled (From Code 1)
+# Async Watermark Bot – Final Corrected Version
+# 1. Static Shape: Pill Box (Radius 20, Padding 40/20)
+# 2. Static Text: Locked to "🦋Vaiᡣ𐭩Su" (Symbola Font)
+# 3. Static Scaling: Resolution / 18
 
 import os
 import re
@@ -31,7 +30,7 @@ AUTH_FILE = "auth_users.json"
 # === TUNING ===
 UPDATE_INTERVAL = 120 
 FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan2"
-FIXED_STATIC_TEXT = "🦋Vaiᡣ𐭩Su"  # <--- HARDCODED STATIC TEXT
+FIXED_STATIC_TEXT = "🦋Vaiᡣ𐭩Su" 
 
 os.makedirs(WORK_DIR, exist_ok=True)
 logging.basicConfig(
@@ -67,18 +66,21 @@ async def check_auth_func(_, __, message: Message):
 
 authorized_only = filters.create(check_auth_func)
 
-# ==================== RESOURCES ====================
-FONT_URL = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
-FONT_PATH = os.path.join(WORK_DIR, "Roboto-Bold.ttf")
+# ==================== RESOURCES (Symbola for 🦋 and 𐭩) ====================
+FONT_URL = "https://github.com/shaunweingarten/fonts/raw/master/Symbola.ttf"
+FONT_PATH = os.path.join(WORK_DIR, "Symbola.ttf")
 
 def check_resources():
     if not os.path.exists(FONT_PATH):
+        print(f"⏳ Downloading Symbola Font (for 🦋 and 𐭩)...")
         try:
             opener = urllib.request.build_opener()
             opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
             urllib.request.install_opener(opener)
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
-        except: pass
+            print("✅ Font Downloaded.")
+        except Exception as e:
+            print(f"❌ Font Download Failed: {e}")
 
 # ==================== SESSION MANAGER ====================
 @dataclass
@@ -140,52 +142,68 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     text = f"⬇️ **Downloading...**\n{render_bar(current, total)}"
     await safe_edit(status_msg, text, last_update_ref)
 
-# ==================== WATERMARK GENERATION ====================
+
+# ==================== WATERMARK GENERATION (YOUR CODE) ====================
 def create_watermark(text: str, style: str = "static"):
-    """
-    style="static": Original Black Box + White Text (with Padding)
-    style="moving": Red Text + No Box (No Stroke)
-    """
+    # Generates a high-quality base image (Font Size 80)
+    # This will be resized later based on resolution
     font_size = 80
     font = ImageFont.load_default()
     
-    for p in [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf"]:
+    # Try loading custom fonts (Prioritize Symbola for 🦋 and 𐭩)
+    for p in [FONT_PATH, "fonts/Symbola.ttf", "Symbola.ttf", "arialbd.ttf"]:
         if os.path.exists(p):
             try: 
                 font = ImageFont.truetype(p, font_size)
                 break
             except: continue
 
-    dummy = Image.new("RGBA", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font)
-    
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-
+    # Determine Padding/Style
     if style == "static":
+        # YOUR SPECIFIC STATIC LOGIC
         px, py = 40, 20
-    else:
-        # Minimal Padding for Moving Text
-        px, py = 4, 4
-
-    w, h = text_w + px, text_h + py
-    
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    
-    x_pos = (w - text_w) // 2
-    y_pos = (h - text_h) // 2 - bbox[1]
-
-    if style == "static":
-        # Black Box + White Text
-        draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        draw.text((x_pos, y_pos), text, font=font, fill=(255, 255, 255, 255))
-    else:
-        # Red Text Only
-        draw.text((x_pos, y_pos), text, font=font, fill=(255, 0, 0, 255))
+        # Calculate size based on text
+        dummy = Image.new("RGBA", (1, 1))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=font)
         
-    return img
+        w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+        
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # Draw pill shape (Radius 20, Black 180)
+        draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
+        
+        # Draw Text centered relative to padding
+        # Note: bbox[0] and bbox[1] offsets are needed for precise centering
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        x_pos = (w - text_w) // 2
+        y_pos = (h - text_h) // 2 - bbox[1] # Subtract offset to realign
+        
+        draw.text((x_pos, y_pos), text, font=font, fill=(255, 255, 255, 255))
+        return img
+
+    else:
+        # MOVING STYLE (Red Text, Minimal Padding)
+        px, py = 4, 4
+        dummy = Image.new("RGBA", (1, 1))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=font)
+        
+        w, h = bbox[2] - bbox[0] + px, bbox[3] - bbox[1] + py
+        
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        x_pos = (w - text_w) // 2
+        y_pos = (h - text_h) // 2 - bbox[1]
+        
+        draw.text((x_pos, y_pos), text, font=font, fill=(255, 0, 0, 255))
+        return img
 
 # ==================== VIDEO PROCESSING ====================
 async def get_video_info(path):
@@ -211,13 +229,15 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         
         # --- SIZE CALCULATION LOGIC ---
         def get_target_size(base_img, is_static_style=True):
-            # 1. FIXED STATIC SIZE LOGIC (FROM CODE 2)
+            # 1. FIXED STATIC SIZE LOGIC (Resolution / 18)
             if is_static_style:
-                target_height = int(sess.resolution / 18) # Hard Logic from Code 2
-                target_width = int(target_height * (base_img.width / base_img.height))
+                target_height = int(sess.resolution / 18) 
+                # Calculate width based on aspect ratio
+                aspect = base_img.width / base_img.height
+                target_width = int(target_height * aspect)
                 return target_width, target_height
             
-            # 2. MOVING SIZE LOGIC (FROM CODE 1 - VARIABLE)
+            # 2. MOVING SIZE LOGIC (Variable Scale)
             else:
                 if sess.custom_size:
                     return sess.custom_size
@@ -229,13 +249,13 @@ async def process_video(in_path, text, out_path, sess, status_msg):
                     return t_w, t_h
 
         if sess.watermark_mode == "dual":
-            # 1. Static Part (ALWAYS HARDCODED TEXT)
+            # 1. Static Part (LOCKED TEXT)
             wm_static_raw = await asyncio.to_thread(create_watermark, FIXED_STATIC_TEXT, style="static")
             w1, h1 = get_target_size(wm_static_raw, is_static_style=True)
             wm_static = await asyncio.to_thread(wm_static_raw.resize, (w1, h1), RESAMPLE_MODE)
             await asyncio.to_thread(wm_static.save, wm_path)
 
-            # 2. Moving Part (User Input Text - Red, No Box)
+            # 2. Moving Part (User Text - Red)
             wm_move_raw = await asyncio.to_thread(create_watermark, sess.second_watermark_text, style="moving")
             w2, h2 = get_target_size(wm_move_raw, is_static_style=False)
             wm_move = await asyncio.to_thread(wm_move_raw.resize, (w2, h2), RESAMPLE_MODE)
@@ -367,7 +387,6 @@ async def worker(uid):
                 if success:
                     _, _, out_duration = await get_video_info(out_path)
                     
-                    # Logic: Use custom thumb if set, otherwise generate from video
                     thumb = sess.custom_thumb_path if (sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path)) else await generate_thumbnail(out_path)
                     is_custom_thumb = (thumb == sess.custom_thumb_path)
 
@@ -381,7 +400,6 @@ async def worker(uid):
                         file_name=final_filename, duration=int(out_duration)
                     )
                     
-                    # Only delete thumb if it was auto-generated (not the custom one)
                     if thumb and not is_custom_thumb: os.remove(thumb)
                 else:
                     await status_msg.edit_text("❌ Processing Failed.")
@@ -426,7 +444,7 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot vFinal (Locked Static)**\n"
+        "**👋 Watermark Bot vFinal (Symbola Fix)**\n"
         "**Modes:**\n"
         "1. `/dual` - Static (Locked) + Moving\n"
         "2. `/ws` - Static Mode (Locked Text)\n"
@@ -449,7 +467,6 @@ async def start_handler(_, m):
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
 async def set_thumb_handler(c, m):
     sess = await get_session(m.from_user.id)
-    # Handle both direct photo and reply to photo
     photo = m.photo
     if not photo and m.reply_to_message:
         photo = m.reply_to_message.photo
@@ -457,7 +474,6 @@ async def set_thumb_handler(c, m):
     if not photo:
         return await m.reply("❌ **Send a photo** or **Reply to a photo** with `/setthumb`.")
         
-    # Delete old thumb if exists
     if sess.custom_thumb_path and os.path.exists(sess.custom_thumb_path):
         try: os.remove(sess.custom_thumb_path)
         except: pass
@@ -602,19 +618,15 @@ async def text_handler(_, m):
     sess = await get_session(m.from_user.id)
     if sess.step == "waiting_text":
         if sess.watermark_mode == "dual":
-            # For Dual, user only inputs the Moving text
             sess.watermark_text = FIXED_STATIC_TEXT
             sess.second_watermark_text = m.text.strip()
             sess.step = "waiting_media"
             await m.reply(f"✅ **Dual Text Set!**\nStatic (Locked): `{sess.watermark_text}`\nMoving: `{sess.second_watermark_text}`\nNow send video.")
         elif sess.watermark_mode == "random":
-             # For Random, user inputs text
             sess.watermark_text = m.text[:50]
             sess.step = "waiting_media"
             await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
         else:
-            # For Static/Slide modes, text is already locked. 
-            # This block might not be reached if step was skipped in command
             await m.reply(f"⚠️ Text is locked to `{FIXED_STATIC_TEXT}` for this mode. Send video.")
 
 @app.on_message((filters.video | filters.document) & filters.private & authorized_only)
