@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Red Text Update
+# Async Watermark Bot – Final Restore (Static Box / Moving Red)
 
 import os
 import re
@@ -25,9 +25,9 @@ WORK_DIR = "downloads"
 AUTH_FILE = "auth_users.json"
 
 # === TUNING ===
-UPDATE_INTERVAL = 120  # Updates progress every 2 minutes
+UPDATE_INTERVAL = 120 
 
-FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan"
+FILENAME_SUFFIX = " 🦋Vaiᡣ𐭩Su×@pglinsan2"
 
 os.makedirs(WORK_DIR, exist_ok=True)
 logging.basicConfig(
@@ -82,6 +82,7 @@ class UserSession:
     user_id: int
     step: str = "idle"
     watermark_text: str = ""
+    second_watermark_text: str = "" 
     watermark_mode: str = "static" 
     queue: List[Message] = field(default_factory=list)
     is_processing: bool = False
@@ -91,10 +92,12 @@ class UserSession:
     codec: str = "libx265"
     custom_size: Optional[Tuple[int, int]] = None
     speed_factor: float = 1.0
+    watermark_scale: float = 1.0
 
     def reset(self):
         self.step = "waiting_text"
         self.watermark_text = ""
+        self.second_watermark_text = ""
         self.queue.clear()
 
 session_manager = {}
@@ -134,7 +137,11 @@ async def download_progress(current, total, status_msg, start_time, last_update_
     await safe_edit(status_msg, text, last_update_ref)
 
 # ==================== WATERMARK GENERATION ====================
-def create_watermark(text: str, no_bg: bool = False):
+def create_watermark(text: str, style: str = "static"):
+    """
+    style="static": Original Black Box + White Text (with Padding)
+    style="moving": Red Text + No Box (No Stroke)
+    """
     font_size = 80
     font = ImageFont.load_default()
     
@@ -149,24 +156,30 @@ def create_watermark(text: str, no_bg: bool = False):
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    # We keep the padding calculation for both modes
-    # This ensures the 'random' text scales to the same visual size as the 'static' text
-    px, py = 40, 20
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
+
+    if style == "static":
+        px, py = 40, 20
+    else:
+        # Minimal Padding for Moving Text
+        px, py = 4, 4
+
     w, h = text_w + px, text_h + py
     
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
-    if no_bg:
-        # Red Text, No Background, No Stroke
-        # We draw it centered in the padded area so scaling logic remains consistent
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
-    else:
-        # Standard: Black Pill, White Text
+    x_pos = (w - text_w) // 2
+    y_pos = (h - text_h) // 2 - bbox[1]
+
+    if style == "static":
+        # Black Box + White Text
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
+        draw.text((x_pos, y_pos), text, font=font, fill=(255, 255, 255, 255))
+    else:
+        # Red Text Only
+        draw.text((x_pos, y_pos), text, font=font, fill=(255, 0, 0, 255))
         
     return img
 
@@ -182,41 +195,88 @@ async def get_video_info(path):
     except: return 0, 0, 0
 
 async def process_video(in_path, text, out_path, sess, status_msg):
-    wm_path = f"{WORK_DIR}/wm_{int(time.time())}_{os.getpid()}.png"
+    pid = os.getpid()
+    ts = int(time.time())
+    
+    wm_path = f"{WORK_DIR}/wm_{ts}_{pid}.png"
+    wm2_path = f"{WORK_DIR}/wm2_{ts}_{pid}.png"
     
     try:
         in_w, in_h, duration = await get_video_info(in_path)
         if duration == 0: duration = 1 
         
-        is_random_mode = (sess.watermark_mode == "random")
-        wm_full = await asyncio.to_thread(create_watermark, text, no_bg=is_random_mode)
-        
-        if sess.custom_size:
-            target_wm_width, target_wm_height = sess.custom_size
-        else:
-            target_wm_height = int(sess.resolution / 18)
-            target_wm_width = int(target_wm_height * (wm_full.width / wm_full.height))
-        
-        wm = await asyncio.to_thread(wm_full.resize, (target_wm_width, target_wm_height), RESAMPLE_MODE)
-        await asyncio.to_thread(wm.save, wm_path)
-        
-        # --- POSITIONING LOGIC ---
-        if sess.watermark_mode == "random":
+        # --- SIZE CALCULATION LOGIC ---
+        def get_target_size(base_img, is_static_style=True):
+            # CONSTANT STATIC SIZE LOGIC
+            if is_static_style:
+                target_height = int(sess.resolution / 18)
+                target_width = int(target_height * (base_img.width / base_img.height))
+                return target_width, target_height
+            
+            # VARIABLE MOVING SIZE LOGIC
+            else:
+                if sess.custom_size:
+                    return sess.custom_size
+                else:
+                    base_height = sess.resolution / 22
+                    scaled_height = base_height * sess.watermark_scale
+                    t_h = int(scaled_height)
+                    t_w = int(t_h * (base_img.width / base_img.height))
+                    return t_w, t_h
+
+        if sess.watermark_mode == "dual":
+            # 1. Static Part (Box + White)
+            wm_static_raw = await asyncio.to_thread(create_watermark, text, style="static")
+            w1, h1 = get_target_size(wm_static_raw, is_static_style=True)
+            wm_static = await asyncio.to_thread(wm_static_raw.resize, (w1, h1), RESAMPLE_MODE)
+            await asyncio.to_thread(wm_static.save, wm_path)
+
+            # 2. Moving Part (Red, No Box)
+            wm_move_raw = await asyncio.to_thread(create_watermark, sess.second_watermark_text, style="moving")
+            w2, h2 = get_target_size(wm_move_raw, is_static_style=False)
+            wm_move = await asyncio.to_thread(wm_move_raw.resize, (w2, h2), RESAMPLE_MODE)
+            await asyncio.to_thread(wm_move.save, wm2_path)
+            
             div_x = 3.7 / sess.speed_factor
             div_y = 2.3 / sess.speed_factor
-            overlay_cmd = f"x='(W-w)/2+(W-w)/2*sin(t/{div_x})':y='(H-h)/2+(H-h)/2*cos(t/{div_y})'"
             
-        elif sess.watermark_mode == "slide" or sess.watermark_mode == "animated":
-             cycle_duration = 30.0 / sess.speed_factor
-             overlay_cmd = f"x='-w+((W+w)*((mod(t,{cycle_duration}))/{cycle_duration}))':y=H-h"
-        
+            filter_complex = (
+                f"[0:v]scale=-2:{sess.resolution}[bg];"
+                f"[bg][1:v]overlay=x=W-w:y=H-h[v1];"
+                f"[v1][2:v]overlay=x='(W-w)/2+(W-w)/2*sin(t/{div_x})':y='(H-h)/2+(H-h)/2*cos(t/{div_y})'"
+            )
+            inputs = ["-i", in_path, "-i", wm_path, "-i", wm2_path]
+
         else:
-             overlay_cmd = "x=W-w:y=H-h"
-        
-        filter_complex = f"[0:v]scale=-2:{sess.resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
-        
-        cmd_args = [
-            "ffmpeg", "-y", "-i", in_path, "-i", wm_path, "-filter_complex", filter_complex,
+            # Single Mode
+            if sess.watermark_mode == "random":
+                style = "moving"
+                is_static = False
+            else:
+                style = "static"
+                is_static = True
+
+            wm_full = await asyncio.to_thread(create_watermark, text, style=style)
+            w, h = get_target_size(wm_full, is_static_style=is_static)
+            wm = await asyncio.to_thread(wm_full.resize, (w, h), RESAMPLE_MODE)
+            await asyncio.to_thread(wm.save, wm_path)
+            
+            if sess.watermark_mode == "random":
+                div_x = 3.7 / sess.speed_factor
+                div_y = 2.3 / sess.speed_factor
+                overlay_cmd = f"x='(W-w)/2+(W-w)/2*sin(t/{div_x})':y='(H-h)/2+(H-h)/2*cos(t/{div_y})'"
+            elif sess.watermark_mode == "slide" or sess.watermark_mode == "animated":
+                 cycle_duration = 30.0 / sess.speed_factor
+                 overlay_cmd = f"x='-w+((W+w)*((mod(t,{cycle_duration}))/{cycle_duration}))':y=H-h"
+            else:
+                 # Static: Absolute Bottom Right
+                 overlay_cmd = "x=W-w:y=H-h"
+            
+            filter_complex = f"[0:v]scale=-2:{sess.resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
+            inputs = ["-i", in_path, "-i", wm_path]
+
+        cmd_args = ["ffmpeg", "-y"] + inputs + [
+            "-filter_complex", filter_complex,
             "-map", "0:a?", "-c:v", sess.codec, "-preset", "fast",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"
         ]
@@ -250,6 +310,7 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         return False
     finally:
         if os.path.exists(wm_path): os.remove(wm_path)
+        if os.path.exists(wm2_path): os.remove(wm2_path)
 
 async def generate_thumbnail(video_path):
     thumb_path = f"{video_path}.jpg"
@@ -349,13 +410,14 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v9.5 (Red Text)**\n"
-        "1. `/ws` - Static Watermark\n"
-        "2. `/w` - Animated Slide\n"
-        "3. `/wr` - **Red Moving Text** (No BG)\n"
-        "4. `/speed <x>` - Animation Speed\n"
-        "5. `/size x y` - Custom Size\n"
-        "6. `/settings` - View Config"
+        "**👋 Watermark Bot v15.0 (Selective Scaling)**\n"
+        "1. `/dual` - **Static(Box) + Moving(Red)**\n"
+        "2. `/ws` - Static (Box + White)\n"
+        "3. `/w` - Animated Slide (Box + White)\n"
+        "4. `/wr` - Random (Red + No BG)\n"
+        "5. `/scale <x>` - Size Scale (Moving Only)\n"
+        "6. `/speed <x>` - Speed\n"
+        "7. `/reset` - Reset"
     )
 
 @app.on_message(filters.command("setthumb") & (filters.photo | filters.reply) & authorized_only)
@@ -367,6 +429,16 @@ async def set_thumb_handler(c, m):
     path = await c.download_media(photo, file_name=os.path.join(WORK_DIR, f"thumb_{m.from_user.id}.jpg"))
     sess.custom_thumb_path = path
     await m.reply("✅ **Custom Thumbnail Saved!**")
+
+@app.on_message(filters.command("dual") & authorized_only)
+async def set_dual(_, m):
+    sess = await get_session(m.from_user.id)
+    sess.reset()
+    sess.watermark_mode = "dual"
+    await m.reply(
+        "✨ **Dual Mode**\n"
+        "Format: `Static (Box) | Moving (Red)`"
+    )
 
 @app.on_message(filters.command("w") & authorized_only)
 async def set_animated(_, m):
@@ -380,7 +452,7 @@ async def set_static(_, m):
     sess = await get_session(m.from_user.id)
     sess.reset()
     sess.watermark_mode = "static"
-    await m.reply("📍 **Static Mode**\nSend the watermark text:")
+    await m.reply("📍 **Static Mode**\n(Box + White Text)\nSend the watermark text:")
 
 @app.on_message(filters.command("wr") & authorized_only)
 async def set_random(_, m):
@@ -392,7 +464,7 @@ async def set_random(_, m):
 @app.on_message(filters.command("speed") & authorized_only)
 async def set_speed(_, m):
     try:
-        if len(m.command) != 2: return await m.reply("Usage: `/speed 1.5`\n(1=Normal, 2=Fast, 0.5=Slow)")
+        if len(m.command) != 2: return await m.reply("Usage: `/speed 1.5`")
         val = float(m.command[1])
         if val <= 0: return await m.reply("❌ Speed must be positive.")
         sess = await get_session(m.from_user.id)
@@ -400,25 +472,28 @@ async def set_speed(_, m):
         await m.reply(f"🚀 **Speed Set to {val}x**")
     except: await m.reply("❌ Invalid number.")
 
-@app.on_message(filters.command("size") & authorized_only)
-async def set_custom_size(_, m):
+@app.on_message(filters.command("scale") & authorized_only)
+async def set_scale(_, m):
     try:
-        if len(m.command) != 3: return await m.reply("Usage: `/size width height`\nExample: `/size 250 100`")
-        w, h = int(m.command[1]), int(m.command[2])
+        if len(m.command) != 2: return await m.reply("Usage: `/scale 1.1`")
+        val = float(m.command[1])
+        if val <= 0: return await m.reply("❌ Scale must be positive.")
         sess = await get_session(m.from_user.id)
-        sess.custom_size = (w, h)
-        await m.reply(f"✅ **Custom Watermark Size Set:** `{w}x{h}`")
-    except: await m.reply("❌ Invalid numbers.")
+        sess.watermark_scale = val
+        await m.reply(f"🔎 **Watermark Scale Set to {val}x**")
+    except: await m.reply("❌ Invalid number.")
 
 @app.on_message(filters.command("reset") & authorized_only)
 async def reset_settings(_, m):
     sess = await get_session(m.from_user.id)
     sess.custom_size = None
     sess.speed_factor = 1.0
+    sess.watermark_scale = 1.0 
     sess.crf = 23
     sess.resolution = 720
     sess.codec = "libx265"
-    await m.reply("🔄 **Settings Reset.**")
+    sess.watermark_mode = "static" 
+    await m.reply("🔄 **All Settings Reset to Defaults.**")
 
 @app.on_message(filters.command("codec") & authorized_only)
 async def set_codec(_, m):
@@ -438,20 +513,29 @@ async def set_codec(_, m):
 async def settings_handler(_, m):
     sess = await get_session(m.from_user.id)
     sz = f"{sess.custom_size[0]}x{sess.custom_size[1]}" if sess.custom_size else "Auto"
-    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nSpeed: `{sess.speed_factor}x`\nSize: `{sz}`\nCodec: `{sess.codec}`")
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nSpeed: `{sess.speed_factor}x`\nScale: `{sess.watermark_scale}x`\nSize: `{sz}`\nCodec: `{sess.codec}`")
 
 @app.on_message(filters.text & filters.private & authorized_only)
 async def text_handler(_, m):
     sess = await get_session(m.from_user.id)
     if sess.step == "waiting_text":
-        sess.watermark_text = m.text[:50]
-        sess.step = "waiting_media"
-        await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
+        if sess.watermark_mode == "dual":
+            if "|" not in m.text:
+                return await m.reply("❌ Error: For Dual Mode, separate texts with `|`\nExample: `Static | Moving`")
+            parts = m.text.split("|", 1)
+            sess.watermark_text = parts[0].strip()
+            sess.second_watermark_text = parts[1].strip()
+            sess.step = "waiting_media"
+            await m.reply(f"✅ **Dual Text Set!**\nStatic: `{sess.watermark_text}`\nMoving: `{sess.second_watermark_text}`\nNow send video.")
+        else:
+            sess.watermark_text = m.text[:50]
+            sess.step = "waiting_media"
+            await m.reply(f"✅ Text Set: `{sess.watermark_text}`\nNow send video.")
 
 @app.on_message((filters.video | filters.document) & filters.private & authorized_only)
 async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
-    if sess.step != "waiting_media": return await m.reply("⚠️ Use /ws, /w, or /wr first.")
+    if sess.step != "waiting_media": return await m.reply("⚠️ Use a mode command first (e.g., /dual).")
     if m.document and "video" not in m.document.mime_type: return await m.reply("❌ Not a video.")
     sess.queue.append(m)
     pos = len(sess.queue)
