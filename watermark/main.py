@@ -207,27 +207,7 @@ def create_watermark(text: str, style: str = "static"):
         
         return img
 
-    else:
-        # === MOVING STYLE LOGIC ===
-        px, py = 4, 4
-        
-        dummy = Image.new("RGBA", (1, 1))
-        d = ImageDraw.Draw(dummy)
-        bbox = d.textbbox((0, 0), text, font=font)
-        
-        w = bbox[2] - bbox[0] + px
-        h = bbox[3] - bbox[1] + py
-        
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        x_pos = (w - text_w) // 2
-        y_pos = (h - text_h) // 2 - bbox[1]
-        
-        draw.text((x_pos, y_pos), text, font=font, fill=(255, 0, 0, 255))
-        return img
+    
 
 
 # ==================== VIDEO PROCESSING ====================
