@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – Random Move & Custom Size Update
+# Async Watermark Bot – Speed Control Added
 
 import os
 import re
@@ -89,8 +89,9 @@ class UserSession:
     resolution: int = 720
     custom_thumb_path: str = None 
     codec: str = "libx265"
-    # New: Custom Size (Width, Height)
     custom_size: Optional[Tuple[int, int]] = None
+    # New: Animation Speed Factor (1.0 = Normal, 2.0 = 2x Fast, 0.5 = Slow)
+    speed_factor: float = 1.0
 
     def reset(self):
         self.step = "waiting_text"
@@ -135,11 +136,6 @@ async def download_progress(current, total, status_msg, start_time, last_update_
 
 # ==================== WATERMARK GENERATION ====================
 def create_watermark(text: str, no_bg: bool = False):
-    """
-    Generates the watermark image.
-    If no_bg is True: No background box, adds stroke to text.
-    If no_bg is False: Adds semi-transparent black pill background.
-    """
     font_size = 80
     font = ImageFont.load_default()
     
@@ -154,28 +150,18 @@ def create_watermark(text: str, no_bg: bool = False):
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    # Padding
     px, py = 40, 20
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
-    
     w, h = text_w + px, text_h + py
     
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     
     if no_bg:
-        # Text Watermark Mode: No Background, Black Outline (Stroke) for visibility
-        draw.text(
-            (px // 2, py // 2), 
-            text, 
-            font=font, 
-            fill=(255, 255, 255, 200), # White text
-            stroke_width=3, 
-            stroke_fill=(0, 0, 0, 200) # Black outline
-        )
+        # Outline for visibility without BG box
+        draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 200), stroke_width=3, stroke_fill=(0, 0, 0, 200))
     else:
-        # Standard Mode: Black Pill Background
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
         
@@ -199,35 +185,34 @@ async def process_video(in_path, text, out_path, sess, status_msg):
         in_w, in_h, duration = await get_video_info(in_path)
         if duration == 0: duration = 1 
         
-        # 1. Generate Watermark Image
-        # If mode is random, we turn off background (no_bg=True)
         is_random_mode = (sess.watermark_mode == "random")
         wm_full = await asyncio.to_thread(create_watermark, text, no_bg=is_random_mode)
         
-        # 2. Determine Final Dimensions (Custom Size vs Auto Scale)
         if sess.custom_size:
-            # User defined specific X, Y size (e.g., 200x50)
             target_wm_width, target_wm_height = sess.custom_size
         else:
-            # Auto Logic: Height = Resolution / 18
             target_wm_height = int(sess.resolution / 18)
             target_wm_width = int(target_wm_height * (wm_full.width / wm_full.height))
         
-        # 3. Resize Watermark
         wm = await asyncio.to_thread(wm_full.resize, (target_wm_width, target_wm_height), RESAMPLE_MODE)
         await asyncio.to_thread(wm.save, wm_path)
         
-        # 4. Overlay Logic
+        # --- MOVEMENT LOGIC WITH SPEED CONTROL ---
         if sess.watermark_mode == "random":
-            # Smooth Random Movement (Lissajous Curve)
-            # x = (W-w)/2 + (W-w)/2 * sin(t/N)
-            # This makes it float around the whole screen smoothly without hitting edges hard
-            overlay_cmd = "x='(W-w)/2+(W-w)/2*sin(t/3.7)':y='(H-h)/2+(H-h)/2*cos(t/2.3)'"
+            # Speed logic: divide divisors by speed_factor
+            # Faster speed = Smaller divisors = Faster oscillation
+            div_x = 3.7 / sess.speed_factor
+            div_y = 2.3 / sess.speed_factor
+            
+            # Lissajous Curve (Smooth Random)
+            overlay_cmd = f"x='(W-w)/2+(W-w)/2*sin(t/{div_x})':y='(H-h)/2+(H-h)/2*cos(t/{div_y})'"
+            
         elif sess.watermark_mode == "slide" or sess.watermark_mode == "animated":
-             # Bottom Slide
-             overlay_cmd = "x='-w+((W+w)*((mod(t,30))/30))':y=H-h-20"
+             # Slide Logic: 30s is default cycle
+             cycle_duration = 30.0 / sess.speed_factor
+             overlay_cmd = f"x='-w+((W+w)*((mod(t,{cycle_duration}))/{cycle_duration}))':y=H-h-20"
         else:
-             # Static Bottom Right
+             # Static
              overlay_cmd = "x=W-w-20:y=H-h-20"
         
         filter_complex = f"[0:v]scale=-2:{sess.resolution}[bg];[bg][1:v]overlay={overlay_cmd}"
@@ -366,12 +351,12 @@ async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS:
         return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
-        "**👋 Watermark Bot v7.0**\n"
+        "**👋 Watermark Bot v8.0 (Speed Control)**\n"
         "1. `/ws` - Static Watermark\n"
         "2. `/w` - Animated Slide\n"
-        "3. `/wr` - **Random Moving Text** (No BG)\n"
-        "4. `/size x y` - Custom Size (e.g. `/size 200 100`)\n"
-        "5. `/reset` - Reset sizes/settings\n"
+        "3. `/wr` - **Random Moving Text**\n"
+        "4. `/speed <x>` - Set Animation Speed (0.5, 1, 2, 3)\n"
+        "5. `/size x y` - Custom Size\n"
         "6. `/settings` - View Config"
     )
 
@@ -406,6 +391,17 @@ async def set_random(_, m):
     sess.watermark_mode = "random"
     await m.reply("🔀 **Random Moving Text Mode**\n(No Background Box)\nSend the watermark text:")
 
+@app.on_message(filters.command("speed") & authorized_only)
+async def set_speed(_, m):
+    try:
+        if len(m.command) != 2: return await m.reply("Usage: `/speed 1.5`\n(1=Normal, 2=Fast, 0.5=Slow)")
+        val = float(m.command[1])
+        if val <= 0: return await m.reply("❌ Speed must be positive.")
+        sess = await get_session(m.from_user.id)
+        sess.speed_factor = val
+        await m.reply(f"🚀 **Speed Set to {val}x**")
+    except: await m.reply("❌ Invalid number.")
+
 @app.on_message(filters.command("size") & authorized_only)
 async def set_custom_size(_, m):
     try:
@@ -420,10 +416,11 @@ async def set_custom_size(_, m):
 async def reset_settings(_, m):
     sess = await get_session(m.from_user.id)
     sess.custom_size = None
+    sess.speed_factor = 1.0
     sess.crf = 23
     sess.resolution = 720
     sess.codec = "libx265"
-    await m.reply("🔄 **Settings Reset to Default.**\nAuto-scaling enabled.")
+    await m.reply("🔄 **Settings Reset.**")
 
 @app.on_message(filters.command("codec") & authorized_only)
 async def set_codec(_, m):
@@ -443,7 +440,7 @@ async def set_codec(_, m):
 async def settings_handler(_, m):
     sess = await get_session(m.from_user.id)
     sz = f"{sess.custom_size[0]}x{sess.custom_size[1]}" if sess.custom_size else "Auto"
-    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nSize: `{sz}`\nCodec: `{sess.codec}`\nCRF: {sess.crf}\nRes: {sess.resolution}p")
+    await m.reply(f"**Settings**\nMode: `{sess.watermark_mode}`\nSpeed: `{sess.speed_factor}x`\nSize: `{sz}`\nCodec: `{sess.codec}`")
 
 @app.on_message(filters.text & filters.private & authorized_only)
 async def text_handler(_, m):
