@@ -144,55 +144,78 @@ async def download_progress(current, total, status_msg, start_time, last_update_
 
 # ==================== WATERMARK GENERATION ====================
 def create_watermark(text: str, style: str = "static"):
-    font_size = 80
-    font = ImageFont.load_default()
-    
-    # SEPARATE FONTS: Use Bold list for Static, Normal list for Moving
+    # === STATIC CONFIG (Standard) ===
     if style == "static":
-        # Code 1 List (Forces Bold/Thick on Linux)
+        font_size = 80
+        # Bold fonts for static
         search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
-    else:
-        # Code 2 List (Your original Moving watermark fonts)
-        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf"]
+        
+        font = ImageFont.load_default()
+        for p in search_paths:
+            if os.path.exists(p):
+                try: 
+                    font = ImageFont.truetype(p, font_size)
+                    break
+                except: continue
 
-    # Load the font based on the list selected above
-    for p in search_paths:
-        if os.path.exists(p):
-            try: 
-                font = ImageFont.truetype(p, font_size)
-                break
-            except: continue
-
-    dummy = Image.new("RGBA", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    bbox = d.textbbox((0, 0), text, font=font)
-    
-    # Base Dimensions
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-
-    if style == "static":
-        # === STATIC: ORIGINAL PILL SHAPE ===
+        dummy = Image.new("RGBA", (1, 1))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=font)
+        
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
         px, py = 40, 20
         w, h = text_w + px, text_h + py
+        
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        
-        # Black Pill Box + White Text (Uses Bold Font)
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
         return img
 
+    # === MOVING CONFIG (Super Sampling) ===
     else:
-        # === MOVING: RED TEXT ONLY (NO BOX) ===
-        # Uses Code 2 Font List (Standard/Thin)
-        px, py = 10, 10
-        w, h = text_w + px, text_h + py
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        # 1. Target Size (We want it to look like size 80)
+        target_size = 80
+        # 2. HD Multiplier (We draw it 3x bigger for quality)
+        scale = 3  
+        hd_size = target_size * scale
         
-        # Pure Red Text
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
+        # Standard fonts for moving
+        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf"]
+        
+        # Load the HD Font
+        hd_font = ImageFont.load_default()
+        for p in search_paths:
+            if os.path.exists(p):
+                try: 
+                    hd_font = ImageFont.truetype(p, hd_size)
+                    break
+                except: continue
+
+        # Calculate dimensions based on the HD font
+        dummy = Image.new("RGBA", (1, 1))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=hd_font)
+        
+        hd_text_w = bbox[2] - bbox[0]
+        hd_text_h = bbox[3] - bbox[1]
+        
+        # HD Padding
+        px, py = 30, 30 
+        w_hd, h_hd = hd_text_w + px, hd_text_h + py
+        
+        # Draw the Giant HD Image
+        img_hd = Image.new("RGBA", (w_hd, h_hd), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img_hd)
+        draw.text((px // 2, py // 2), text, font=hd_font, fill=(255, 0, 0, 255))
+        
+        # 3. Shrink it back down to standard size (Result: High Quality, Normal Size)
+        final_w = w_hd // scale
+        final_h = h_hd // scale
+        
+        # LANCZOS filter is the secret to keeping it sharp when shrinking
+        img = img_hd.resize((final_w, final_h), Image.Resampling.LANCZOS)
         return img
     
 
