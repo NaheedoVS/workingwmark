@@ -147,17 +147,10 @@ def create_watermark(text: str, style: str = "static"):
     font_size = 80
     font = ImageFont.load_default()
     
-    # === FONT SETUP ===
-    # We add the Linux system font path to BOTH lists.
-    # This prevents the "Moving" text from falling back to a pixelated default font.
-    
-    if style == "static":
-        # Static: Prioritize Bold Fonts
-        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
-    else:
-        # Moving: Prioritize Bold/Standard but INCLUDE the system path as a backup
-        # This fixes the "poor quality" issue if Arial isn't found
-        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    # === FONT SETUP (FIXED) ===
+    # We now use BOLD fonts for BOTH Static and Moving.
+    # Why? Bold text prevents the "Red Blur" issue on videos.
+    search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
 
     # Load the best available font
     for p in search_paths:
@@ -171,7 +164,7 @@ def create_watermark(text: str, style: str = "static"):
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    # Base Dimensions
+    # Calculate Exact Text Dimensions
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
@@ -182,20 +175,25 @@ def create_watermark(text: str, style: str = "static"):
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
+        # Draw Background
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
+        
+        # FIX: Use anchor="mm" to center perfectly (Stops "Cut from down" issue)
+        draw.text((w / 2, h / 2), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
         return img
 
     else:
-        # === MOVING: RED TEXT (Sharp) ===
-        # No resizing, just direct drawing with the correct font
+        # === MOVING: RED TEXT ===
         px, py = 10, 10
         w, h = text_w + px, text_h + py
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
+        # FIX: Use anchor="mm" to center perfectly
+        # Using BOLD font (loaded above) makes this look sharper/less blurry
+        draw.text((w / 2, h / 2), text, font=font, fill=(255, 0, 0, 255), anchor="mm")
         return img
+    
     
 
 # ==================== PROCESSOR ====================
