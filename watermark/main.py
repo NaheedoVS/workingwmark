@@ -147,12 +147,14 @@ def create_watermark(text: str, style: str = "static"):
     font_size = 80
     font = ImageFont.load_default()
     
-    # === FONT SETUP (FIXED) ===
-    # We now use BOLD fonts for BOTH Static and Moving.
-    # Why? Bold text prevents the "Red Blur" issue on videos.
-    search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+    # === FONT SELECTION ===
+    if style == "static":
+        # Static: Full Bold
+        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+    else:
+        # Moving: Standard/Thin
+        search_paths = [FONT_PATH, "fonts/Roboto-Regular.ttf", "Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
 
-    # Load the best available font
     for p in search_paths:
         if os.path.exists(p):
             try: 
@@ -164,34 +166,31 @@ def create_watermark(text: str, style: str = "static"):
     d = ImageDraw.Draw(dummy)
     bbox = d.textbbox((0, 0), text, font=font)
     
-    # Calculate Exact Text Dimensions
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
     if style == "static":
-        # === STATIC: PILL SHAPE ===
+        # === STATIC ===
         px, py = 40, 20
         w, h = text_w + px, text_h + py
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        
-        # Draw Background
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        
-        # FIX: Use anchor="mm" to center perfectly (Stops "Cut from down" issue)
         draw.text((w / 2, h / 2), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
         return img
 
     else:
-        # === MOVING: RED TEXT ===
+        # === MOVING (Fake Semi-Bold) ===
         px, py = 10, 10
-        w, h = text_w + px, text_h + py
+        # Add a tiny bit of extra padding for the stroke
+        w, h = text_w + px + 2, text_h + py + 2
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        # FIX: Use anchor="mm" to center perfectly
-        # Using BOLD font (loaded above) makes this look sharper/less blurry
-        draw.text((w / 2, h / 2), text, font=font, fill=(255, 0, 0, 255), anchor="mm")
+        # TRICK: Stroke width 1 with the SAME Red color.
+        # This makes it slightly bolder than 'Thin', but much thinner than 'Bold'.
+        # It fixes the pixelation without making the text huge.
+        draw.text((w / 2, h / 2), text, font=font, fill=(255, 0, 0, 255), anchor="mm", stroke_width=1, stroke_fill=(255, 0, 0, 255))
         return img
     
     
