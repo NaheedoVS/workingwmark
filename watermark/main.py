@@ -144,78 +144,57 @@ async def download_progress(current, total, status_msg, start_time, last_update_
 
 # ==================== WATERMARK GENERATION ====================
 def create_watermark(text: str, style: str = "static"):
-    # === STATIC CONFIG (Standard) ===
+    font_size = 80
+    font = ImageFont.load_default()
+    
+    # === FONT SETUP ===
+    # We add the Linux system font path to BOTH lists.
+    # This prevents the "Moving" text from falling back to a pixelated default font.
+    
     if style == "static":
-        font_size = 80
-        # Bold fonts for static
+        # Static: Prioritize Bold Fonts
         search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
-        
-        font = ImageFont.load_default()
-        for p in search_paths:
-            if os.path.exists(p):
-                try: 
-                    font = ImageFont.truetype(p, font_size)
-                    break
-                except: continue
+    else:
+        # Moving: Prioritize Bold/Standard but INCLUDE the system path as a backup
+        # This fixes the "poor quality" issue if Arial isn't found
+        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
 
-        dummy = Image.new("RGBA", (1, 1))
-        d = ImageDraw.Draw(dummy)
-        bbox = d.textbbox((0, 0), text, font=font)
-        
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
+    # Load the best available font
+    for p in search_paths:
+        if os.path.exists(p):
+            try: 
+                font = ImageFont.truetype(p, font_size)
+                break
+            except: continue
+
+    dummy = Image.new("RGBA", (1, 1))
+    d = ImageDraw.Draw(dummy)
+    bbox = d.textbbox((0, 0), text, font=font)
+    
+    # Base Dimensions
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    if style == "static":
+        # === STATIC: PILL SHAPE ===
         px, py = 40, 20
         w, h = text_w + px, text_h + py
-        
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
+        
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
         draw.text((px // 2, py // 2), text, font=font, fill=(255, 255, 255, 255))
         return img
 
-    # === MOVING CONFIG (Super Sampling) ===
     else:
-        # 1. Target Size (We want it to look like size 80)
-        target_size = 80
-        # 2. HD Multiplier (We draw it 3x bigger for quality)
-        scale = 3  
-        hd_size = target_size * scale
+        # === MOVING: RED TEXT (Sharp) ===
+        # No resizing, just direct drawing with the correct font
+        px, py = 10, 10
+        w, h = text_w + px, text_h + py
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
         
-        # Standard fonts for moving
-        search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "Arial.ttf"]
-        
-        # Load the HD Font
-        hd_font = ImageFont.load_default()
-        for p in search_paths:
-            if os.path.exists(p):
-                try: 
-                    hd_font = ImageFont.truetype(p, hd_size)
-                    break
-                except: continue
-
-        # Calculate dimensions based on the HD font
-        dummy = Image.new("RGBA", (1, 1))
-        d = ImageDraw.Draw(dummy)
-        bbox = d.textbbox((0, 0), text, font=hd_font)
-        
-        hd_text_w = bbox[2] - bbox[0]
-        hd_text_h = bbox[3] - bbox[1]
-        
-        # HD Padding
-        px, py = 30, 30 
-        w_hd, h_hd = hd_text_w + px, hd_text_h + py
-        
-        # Draw the Giant HD Image
-        img_hd = Image.new("RGBA", (w_hd, h_hd), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img_hd)
-        draw.text((px // 2, py // 2), text, font=hd_font, fill=(255, 0, 0, 255))
-        
-        # 3. Shrink it back down to standard size (Result: High Quality, Normal Size)
-        final_w = w_hd // scale
-        final_h = h_hd // scale
-        
-        # LANCZOS filter is the secret to keeping it sharp when shrinking
-        img = img_hd.resize((final_w, final_h), Image.Resampling.LANCZOS)
+        draw.text((px // 2, py // 2), text, font=font, fill=(255, 0, 0, 255))
         return img
     
 
