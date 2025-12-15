@@ -290,6 +290,10 @@ async def worker(uid):
                 success = await process_video(in_path, sess.watermark_text, out_path, sess, status_msg)
                 
                 if success:
+                    # === RESTORED DURATION CHECK ===
+                    # This was missing in the previous code, causing 00:00
+                    _, _, out_duration = await get_video_info(out_path)
+                    
                     thumb = sess.custom_thumb_path 
                     if not thumb or not os.path.exists(thumb):
                         cmd = ["ffmpeg", "-y", "-i", out_path, "-ss", "00:00:02", "-vframes", "1", "-vf", "scale=320:-1", f"{out_path}.jpg"]
@@ -299,18 +303,17 @@ async def worker(uid):
                     name_root, ext = os.path.splitext(file.file_name or "video.mp4")
                     await status_msg.edit("📤 **Uploading...**")
                     
-                    # Original Filename Logic + Suffix
                     await app.send_video(
                         uid, out_path, 
                         caption=original_caption or "✅ Done", 
                         thumb=thumb, 
-                        file_name=f"{name_root}{FILENAME_SUFFIX}{ext}"
+                        file_name=f"{name_root}{FILENAME_SUFFIX}{ext}",
+                        duration=int(out_duration) # <--- Passed to Telegram here
                     )
                     
                     if thumb and thumb != sess.custom_thumb_path: os.remove(thumb)
-                    await status_msg.delete() # Only delete on Success
+                    await status_msg.delete() 
                 else:
-                    # Keep message on failure for debugging
                     await status_msg.edit("❌ **Processing Failed.**\n(Check logs or try different video)")
                 
                 if os.path.exists(in_path): os.remove(in_path)
@@ -318,7 +321,6 @@ async def worker(uid):
 
             except Exception as e:
                 logger.error(f"Worker Error: {e}")
-                # Keep message on crash
                 await status_msg.edit(f"❌ **Critical Error:**\n`{str(e)}`")
     finally: sess.is_processing = False
 
@@ -341,6 +343,8 @@ async def cancel_handler(_, m):
         
     if cancelled: await m.reply("🛑 **Cancelled.**")
     else: await m.reply("💤 Nothing was processing.")
+
+            
 
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
