@@ -344,7 +344,8 @@ async def cancel_handler(_, m):
 
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
-    if m.from_user.id not in AUTHORIZED_USERS: return
+    if m.from_user.id not in AUTHORIZED_USERS:
+        return await m.reply(f"⛔ **Access Denied**\nYour ID: `{m.from_user.id}`")
     await m.reply(
         "**👋 Watermark Bot v9.0**\n\n"
         "**Set Mode:**\n"
@@ -444,12 +445,16 @@ async def media_handler(c, m):
         return await m.reply("❌ **This is not a video file.**")
         
     sess.queue.append(m)
-    await m.reply(f"✅ **Added to Queue**")
+    # RESTORED: Queue Position Counter
+    await m.reply(f"✅ **Added to Queue** (Pos: {len(sess.queue)})")
     asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
     check_resources()
+    print("Bot is starting...")
     app.start()
+    try: app.send_message(OWNER_ID, "Hey Vaisu welcome back")
+    except: pass
+    print("Bot is now running.")
     idle()
     app.stop()
-
