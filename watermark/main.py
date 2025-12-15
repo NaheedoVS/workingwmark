@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Async Watermark Bot – v8.0 (Cancel Added + Stability Fixes)
+# Async Watermark Bot – v9.0 (Stable + Cancel + Debug Mode)
 
 import os
 import re
@@ -14,7 +14,7 @@ from typing import List, Set
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, MessageNotModified
+from pyrogram.errors import FloodWait
 
 # ==================== CONFIG ====================
 API_ID = int(os.environ.get("API_ID", "0")) 
@@ -98,7 +98,7 @@ class UserSession:
     # System
     queue: List[Message] = field(default_factory=list)
     is_processing: bool = False
-    current_process: asyncio.subprocess.Process = None # Added for Cancel function
+    current_process: asyncio.subprocess.Process = None # Added for Cancel
 
     def reset(self):
         self.step = "waiting_text"
@@ -118,10 +118,8 @@ def create_watermark(text: str, style: str = "static"):
     font = ImageFont.load_default()
     
     if style == "static":
-        # STATIC: Bold/Thick Fonts
         search_paths = [FONT_PATH, "fonts/Roboto-Bold.ttf", "arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
     else:
-        # MOVING: Thin/Standard Fonts (DejaVuSans.ttf is standard linux font)
         search_paths = [FONT_PATH, "fonts/Roboto-Regular.ttf", "Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
 
     for p in search_paths:
@@ -138,22 +136,18 @@ def create_watermark(text: str, style: str = "static"):
     text_h = bbox[3] - bbox[1]
 
     if style == "static":
-        # === STATIC (Bold + Box) ===
         px, py = 40, 20
         w, h = text_w + px, text_h + py
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=20, fill=(0, 0, 0, 180))
-        # Anchor 'mm' prevents "cut from down"
         draw.text((w / 2, h / 2), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
         return img
     else:
-        # === MOVING (Semi-Bold Trick) ===
         px, py = 10, 10
         w, h = text_w + px + 2, text_h + py + 2
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        # Stroke width 1 makes it readable but not too thick
         draw.text((w / 2, h / 2), text, font=font, fill=(255, 0, 0, 255), anchor="mm", stroke_width=1, stroke_fill=(255, 0, 0, 255))
         return img
 
@@ -280,15 +274,18 @@ async def worker(uid):
             message = sess.queue.pop(0)
             file = message.video or message.document
             original_caption = message.caption.html if message.caption else ""
+            
             status_msg = await app.send_message(uid, f"⬇️ **Downloading...**")
             dl_path = os.path.join(WORK_DIR, f"in_{uid}_{int(time.time())}.mp4")
             
             try:
                 in_path = await app.download_media(message, file_name=dl_path, progress=download_progress, progress_args=(status_msg, time.time(), [0]))
-                if not in_path: continue
+                if not in_path: 
+                    await status_msg.edit("❌ Download Failed.")
+                    continue
 
                 out_path = os.path.join(WORK_DIR, f"out_{uid}_{int(time.time())}_{random.randint(100,999)}.mp4")
-                await status_msg.edit(f"⏳ **Starting...**")
+                await status_msg.edit(f"⏳ **Starting Processing...**")
                 
                 success = await process_video(in_path, sess.watermark_text, out_path, sess, status_msg)
                 
@@ -301,17 +298,28 @@ async def worker(uid):
 
                     name_root, ext = os.path.splitext(file.file_name or "video.mp4")
                     await status_msg.edit("📤 **Uploading...**")
-                    await app.send_video(uid, out_path, caption=original_caption or "✅ Done", thumb=thumb, file_name=f"{name_root}{FILENAME_SUFFIX}{ext}")
+                    
+                    # Original Filename Logic + Suffix
+                    await app.send_video(
+                        uid, out_path, 
+                        caption=original_caption or "✅ Done", 
+                        thumb=thumb, 
+                        file_name=f"{name_root}{FILENAME_SUFFIX}{ext}"
+                    )
+                    
                     if thumb and thumb != sess.custom_thumb_path: os.remove(thumb)
+                    await status_msg.delete() # Only delete on Success
                 else:
-                    await status_msg.edit("❌ Failed or Cancelled.")
+                    # Keep message on failure for debugging
+                    await status_msg.edit("❌ **Processing Failed.**\n(Check logs or try different video)")
                 
-                await status_msg.delete()
                 if os.path.exists(in_path): os.remove(in_path)
                 if os.path.exists(out_path): os.remove(out_path)
 
             except Exception as e:
                 logger.error(f"Worker Error: {e}")
+                # Keep message on crash
+                await status_msg.edit(f"❌ **Critical Error:**\n`{str(e)}`")
     finally: sess.is_processing = False
 
 @app.on_message(filters.command("cancel") & authorized_only)
@@ -319,29 +327,26 @@ async def cancel_handler(_, m):
     sess = await get_session(m.from_user.id)
     cancelled = False
     
-    # 1. Kill FFmpeg
     if sess.current_process:
         try: 
             sess.current_process.terminate()
             cancelled = True
         except: pass
-    # 2. Clear Queue
     if sess.queue:
         sess.queue.clear()
         cancelled = True
-    # 3. Reset Flag
     if sess.is_processing:
         sess.is_processing = False
         cancelled = True
         
-    if cancelled: await m.reply("🛑 **Cancelled & Queue Cleared.**")
-    else: await m.reply("💤 Nothing is running.")
+    if cancelled: await m.reply("🛑 **Cancelled.**")
+    else: await m.reply("💤 Nothing was processing.")
 
 @app.on_message(filters.command("start"))
 async def start_handler(_, m):
     if m.from_user.id not in AUTHORIZED_USERS: return
     await m.reply(
-        "**👋 Watermark Bot v8.0**\n\n"
+        "**👋 Watermark Bot v9.0**\n\n"
         "**Set Mode:**\n"
         "• `/ws` - Static (Box + Bold)\n"
         "• `/w` - Animated (Red Text)\n"
@@ -358,7 +363,6 @@ async def start_handler(_, m):
         "• `/settings` - View Config\n"
         "• `/auth` & `/unauth` (Owner)"
     )
-
 
 @app.on_message(filters.command("settings") & authorized_only)
 async def settings_handler(_, m):
@@ -434,8 +438,13 @@ async def text_handler(_, m):
 async def media_handler(c, m):
     sess = await get_session(m.from_user.id)
     if sess.step != "waiting_media": return await m.reply("⚠️ Set text first (/ws, /w).")
+    
+    # === FIX: PREVENT SCREENSHOT CRASH ===
+    if m.document and "video" not in (m.document.mime_type or ""):
+        return await m.reply("❌ **This is not a video file.**")
+        
     sess.queue.append(m)
-    await m.reply(f"✅ Added to Queue.")
+    await m.reply(f"✅ **Added to Queue**")
     asyncio.create_task(worker(m.from_user.id))
 
 if __name__ == "__main__":
@@ -443,3 +452,4 @@ if __name__ == "__main__":
     app.start()
     idle()
     app.stop()
+
