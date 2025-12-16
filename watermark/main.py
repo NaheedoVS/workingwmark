@@ -493,6 +493,17 @@ async def media_handler(c, m):
     await m.reply(f"✅ **Added to Queue** (Pos: {len(sess.queue)})")
     asyncio.create_task(worker(m.from_user.id))
 
+# --- NEW CANCEL COMMAND ---
+@app.on_message(filters.command("cancel") & authorized_only)
+async def cancel_handler(_, m):
+    sess = await get_session(m.from_user.id)
+    if not sess.queue:
+        return await m.reply("❌ **Queue is empty.**")
+    
+    count = len(sess.queue)
+    sess.queue.clear()
+    await m.reply(f"🛑 **Cancelled!**\nCleared {count} item(s) from the queue.\nCurrent task will finish shortly.")
+
 if __name__ == "__main__":
     check_resources()
     print("Bot is starting...")
