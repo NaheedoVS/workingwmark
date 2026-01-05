@@ -125,15 +125,10 @@ def render_bar(current, total):
     return f"[{'█' * filled}{'░' * (10 - filled)}] {pct}%"
 
 async def safe_edit(msg, text, timer_ref):
-    now = time.time()
-    if (now - timer_ref[0]) < UPDATE_INTERVAL: return 
-    try:
-        await msg.edit_text(text)
-        timer_ref[0] = now
-    except FloodWait as e:
-        timer_ref[0] = now + e.value + 10
-    except MessageNotModified: pass
-    except Exception as e: logger.error(f"Edit failed: {e}")
+    # We do nothing here. This disables the progress bar updates.
+    # The bot will still show "Downloading", "Processing", and "Uploading" 
+    # via the main worker function, but it won't flood Telegram with % updates.
+    return
 
 async def download_progress(current, total, status_msg, start_time, last_update_ref):
     if current == total: pass
@@ -197,14 +192,35 @@ def create_watermark(text: str, style: str = "static"):
 
 # ==================== PROCESSOR ====================
 async def get_video_info(path):
-    cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", path]
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, _ = await process.communicate()
+    # We ask ffprobe for both stream info AND format (container) info
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0", 
+        "-show_entries", "stream=width,height,duration:format=duration", 
+        "-of", "json", path
+    ]
     try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            return 0, 0, 0
+            
         meta = json.loads(stdout)
         stream = meta["streams"][0]
-        return int(stream.get("width", 0)), int(stream.get("height", 0)), float(stream.get("duration", 0))
-    except: return 0, 0, 0
+        
+        # 1. Try to get duration from the VIDEO STREAM
+        dur = float(stream.get("duration", 0))
+        
+        # 2. If Stream fails (is 0), get it from the CONTAINER (Format)
+        if dur == 0:
+            dur = float(meta["format"].get("duration", 0))
+
+        return int(stream.get("width", 0)), int(stream.get("height", 0)), dur
+    except: 
+        return 0, 0, 0
+
 
 async def process_video(in_path, text, out_path, sess, status_msg):
     wm_path = f"{WORK_DIR}/wm_{int(time.time())}_{os.getpid()}.png"
